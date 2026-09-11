@@ -34,6 +34,7 @@ import {
 } from '../mediaCapabilities'
 import type { ModelParamState } from '../hooks/useModelParams'
 import type {
+  AgentModel,
   MediaInputSpec,
   MediaKind,
   ModeId,
@@ -62,6 +63,17 @@ interface Props {
   maxDuration: number
   maxUploadMb: number
   publicBaseUsable: boolean
+  agentModels: AgentModel[]
+  agentEnabled: boolean
+  agentModelId: string
+  agentMode: 'suggest' | 'confirm' | 'auto'
+  agentTargetDuration: number
+  onAgentEnabledChange: (enabled: boolean) => void
+  onAgentModelChange: (modelId: string) => void
+  onAgentModeChange: (mode: 'suggest' | 'confirm' | 'auto') => void
+  onAgentTargetDurationChange: (duration: number) => void
+  onAgentPlan: () => void
+  planning: boolean
 }
 
 export function stateForModel(model: VideoModel, mode?: ModeId): ComposerState {
@@ -86,6 +98,17 @@ export default function Composer({
   maxDuration,
   maxUploadMb,
   publicBaseUsable,
+  agentModels,
+  agentEnabled,
+  agentModelId,
+  agentMode,
+  agentTargetDuration,
+  onAgentEnabledChange,
+  onAgentModelChange,
+  onAgentModeChange,
+  onAgentTargetDurationChange,
+  onAgentPlan,
+  planning,
 }: Props) {
   const { message } = AntApp.useApp()
   const [uploadingKind, setUploadingKind] = useState<MediaKind | null>(null)
@@ -279,7 +302,7 @@ export default function Composer({
                 const preview = item.signed_url || item.url
                 return (
                   <div className={`composer-media-card ${item.kind}`} key={`${item.url}-${index}`}>
-                    {item.kind === 'image' ? (
+                    {item.kind === 'image' || item.kind === 'end_frame' ? (
                       <img src={preview} alt={token} />
                     ) : item.kind === 'video' ? (
                       <video src={preview} muted preload="metadata" playsInline />
@@ -301,7 +324,9 @@ export default function Composer({
                     >
                       <DeleteOutlined />
                     </button>
-                    {capability.id === 'r2v' ? (
+                    {item.kind === 'end_frame' ? (
+                      <span className="composer-media-token">尾帧</span>
+                    ) : capability.id === 'r2v' ? (
                       <button
                         type="button"
                         className="composer-media-token"
@@ -335,7 +360,7 @@ export default function Composer({
                     disabled={uploadingKind !== null}
                   >
                     <span className="composer-upload-icon">
-                      {spec.kind === 'image'
+                      {spec.kind === 'image' || spec.kind === 'end_frame'
                         ? <PictureOutlined />
                         : spec.kind === 'video'
                           ? <VideoCameraOutlined />
@@ -401,6 +426,44 @@ export default function Composer({
               if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && canSend) onSubmit()
             }}
           />
+          <div className="composer-agent-bar">
+            <button
+              type="button"
+              className={'composer-toggle' + (agentEnabled ? ' active' : '')}
+              aria-pressed={agentEnabled}
+              onClick={() => onAgentEnabledChange(!agentEnabled)}
+            >
+              <ExperimentOutlined /> Agent
+            </button>
+            {agentEnabled && (
+              <>
+                <Select
+                  size="small"
+                  value={agentModelId || undefined}
+                  placeholder={agentModels.length ? '选择 Agent 模型' : '规则规划器'}
+                  disabled={!agentModels.length}
+                  onChange={onAgentModelChange}
+                  options={agentModels.map((item) => ({ value: item.id, label: item.name }))}
+                />
+                <Segmented
+                  size="small"
+                  value={agentMode}
+                  onChange={(value) => onAgentModeChange(value as 'suggest' | 'confirm' | 'auto')}
+                  options={[
+                    { value: 'suggest', label: '建议' },
+                    { value: 'confirm', label: '确认' },
+                    { value: 'auto', label: '自动' },
+                  ]}
+                />
+                <Select
+                  size="small"
+                  value={agentTargetDuration}
+                  onChange={onAgentTargetDurationChange}
+                  options={[15, 30, 45, 60].map((value) => ({ value, label: `${value} 秒` }))}
+                />
+              </>
+            )}
+          </div>
           <div className="composer-submit-row">
             <span
               className={'composer-summary' + (missingMedia ? ' warning' : '')}
@@ -473,12 +536,12 @@ export default function Composer({
             <Button
               type="primary"
               className="composer-submit"
-              loading={sending}
-              disabled={!canSend}
-              onClick={onSubmit}
+              loading={sending || planning}
+              disabled={!canSend || planning}
+              onClick={agentEnabled ? onAgentPlan : onSubmit}
             >
-              <span>生成视频</span>
-              {!sending && <SendOutlined />}
+              <span>{agentEnabled ? '规划视频' : '生成视频'}</span>
+              {!sending && !planning && <SendOutlined />}
             </Button>
           </div>
         </div>

@@ -168,16 +168,32 @@ def _extract_video_url(output: dict[str, Any]) -> str:
     return ""
 
 
-async def chat(api_key: str, model: str, messages: list[dict[str, str]]) -> str:
-    """调用 DashScope 兼容模式的文本模型（用于多轮提示词改写）。"""
+async def chat(
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    base_url: str | None = None,
+) -> str:
+    """调用 OpenAI-compatible text model for context and Skill rewriting."""
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {"model": model, "messages": messages, "temperature": 0.3}
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(
-            settings.dashscope_base_url + CHAT_PATH, headers=headers, json=body
+            _chat_url(base_url or settings.dashscope_base_url), headers=headers, json=body
         )
     data = _read("提示词改写失败", response)
     choices = data.get("choices") or []
     if not choices:
         raise DashScopeError("提示词改写失败：模型未返回内容")
     return (choices[0].get("message") or {}).get("content", "").strip()
+
+
+def _chat_url(base_url: str) -> str:
+    """Normalize a host, DashScope compatible URL, or OpenAI /v1 URL."""
+    base = base_url.rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    if base.endswith("/compatible-mode/v1") or base.endswith("/v1"):
+        return base + "/chat/completions"
+    return base + CHAT_PATH

@@ -14,6 +14,30 @@ class GraphValidationError(ValueError):
     pass
 
 
+def media_handles(node: Mapping[str, Any] | Any) -> dict[str, list[str]]:
+    """Return declared dynamic handles, with legacy fixed-slot compatibility."""
+    data = node.get("data") if isinstance(node, Mapping) else getattr(node, "data", None)
+    data = data or {}
+    declared = data.get("media_slots")
+    model = get_model(str(data.get("model", "")))
+    capability = model.capability(str(data.get("capability", ""))) if model else None
+    if capability is None:
+        return {}
+    result: dict[str, list[str]] = {}
+    for spec in capability.input_specs():
+        values = declared.get(spec.kind) if isinstance(declared, dict) else None
+        if isinstance(values, list):
+            handles = [str(value) for value in values]
+            if any(not value.startswith(f"{spec.kind}_") for value in handles):
+                raise GraphValidationError(f"{spec.label}槽位格式无效")
+            if len(handles) > spec.max_count:
+                raise GraphValidationError(f"{spec.label}最多允许 {spec.max_count} 个槽位")
+            result[spec.kind] = handles
+        else:
+            result[spec.kind] = [f"{spec.kind}_{index}" for index in range(spec.max_count)]
+    return result
+
+
 def _output_type(node: Mapping[str, Any], handle: str) -> str | None:
     if handle != "out":
         return None
@@ -38,15 +62,9 @@ def _input_type(node: Mapping[str, Any], handle: str) -> str | None:
     capability = model.capability(str(data.get("capability", ""))) if model else None
     if capability is None:
         return None
-    for spec in capability.input_specs():
-        prefix = f"{spec.kind}_"
-        if not handle.startswith(prefix):
-            continue
-        try:
-            index = int(handle.removeprefix(prefix))
-        except ValueError:
-            return None
-        return spec.kind if 0 <= index < spec.max_count else None
+    for kind, handles in media_handles(node).items():
+        if handle in handles:
+            return "image" if kind == "end_frame" else kind
     return None
 
 

@@ -21,6 +21,7 @@ RELOAD_ORDER = (
     "app.prompt_context",
     "app.prompt_skills",
     "app.tasks",
+    "app.agent_executor",
     "app.cleanup",
     "app.canvas_graph",
     "app.routers.conversations",

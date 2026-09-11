@@ -4,6 +4,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from .config import settings
+from .agent_provider import AgentError, context_model
 from .dashscope import chat
 from .models import Message
 
@@ -72,8 +73,10 @@ async def resolve_prompt(
     if not settings.context_enabled:
         return _fallback(previous, latest)
 
-    key = settings.context_api_key or api_key
-    if not key:
+    try:
+        provider = context_model()
+    except AgentError as exc:
+        logger.warning("Agent 未配置，跳过上下文改写：%s", exc)
         return _fallback(previous, latest)
 
     lines = ["以下是本次对话的历史记录："]
@@ -85,12 +88,13 @@ async def resolve_prompt(
 
     try:
         content = await chat(
-            key,
-            settings.context_model,
+            provider.api_key,
+            provider.id,
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": "\n".join(lines)},
             ],
+            base_url=provider.base_url,
         )
     except Exception as exc:  # 改写失败不应阻断视频生成
         logger.warning("提示词改写失败，回退到简单拼接：%s", exc)

@@ -13,11 +13,12 @@ from .config import settings
 from sqlalchemy import inspect, text
 
 from .database import Base, SessionLocal, engine
-from .models import User
+from .models import AgentRun, AgentTask, User
 from .routers import agent, auth, canvas, catalog, conversations, media, skills, uploads, users
 from .security import hash_password
 from .cleanup import run_periodically
 from .tasks import bind_loop, resume_unfinished
+from .agent_executor import bind_loop as bind_agent_loop, resume_runs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -42,6 +43,21 @@ def init_db() -> None:
             connection.execute(
                 text("ALTER TABLE messages ADD COLUMN reference_media JSON NOT NULL DEFAULT '[]'")
             )
+    agent_columns = {column["name"] for column in inspector.get_columns("agent_turns")}
+    migrations = {
+        "agent_model_id": "ALTER TABLE agent_turns ADD COLUMN agent_model_id VARCHAR(128) NOT NULL DEFAULT ''",
+        "tokens_in": "ALTER TABLE agent_turns ADD COLUMN tokens_in INTEGER NOT NULL DEFAULT 0",
+        "tokens_out": "ALTER TABLE agent_turns ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0",
+        "repair_count": "ALTER TABLE agent_turns ADD COLUMN repair_count INTEGER NOT NULL DEFAULT 0",
+        "warning": "ALTER TABLE agent_turns ADD COLUMN warning TEXT NOT NULL DEFAULT ''",
+    }
+    for name, statement in migrations.items():
+        if name not in agent_columns:
+            with engine.begin() as connection:
+                connection.execute(text(statement))
+    # Agent execution tables were added after the initial planning-only release.
+    # create_all handles fresh installations; existing SQLite databases get them here.
+    Base.metadata.create_all(bind=engine, tables=[AgentRun.__table__, AgentTask.__table__])
     db = SessionLocal()
     try:
         if db.query(User).count() == 0:
@@ -61,6 +77,7 @@ def init_db() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     bind_loop(asyncio.get_running_loop())
+    bind_agent_loop(asyncio.get_running_loop())
     init_db()
     for group, key in settings.api_keys.items():
         if not key:
@@ -79,6 +96,7 @@ async def lifespan(app: FastAPI):
     if not settings.trusted_hosts:
         logger.warning("未配置 APP_DOMAIN / TRUSTED_HOSTS，未启用 Host 头校验")
     await resume_unfinished()
+    await resume_runs()
 
     cleanup_task = None
     if settings.video_retention_days > 0:

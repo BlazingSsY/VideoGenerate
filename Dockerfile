@@ -10,6 +10,10 @@ RUN npm run build
 # ---------- 第二阶段：运行后端 + 静态前端 ----------
 FROM python:3.11-slim
 
+ARG APP_VERSION=1.5
+LABEL org.opencontainers.image.title="video-generate" \
+      org.opencontainers.image.version="${APP_VERSION}"
+
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     DATA_DIR=/app/data \
@@ -18,7 +22,10 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 COPY backend/requirements.txt ./backend/requirements.txt
-RUN pip install --no-cache-dir -r backend/requirements.txt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir -r backend/requirements.txt
 
 COPY backend/ ./backend/
 COPY --from=frontend /build/dist ./frontend_dist

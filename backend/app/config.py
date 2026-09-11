@@ -1,5 +1,6 @@
 """全局配置：全部来自项目根目录的 .env 文件。"""
 import os
+import json
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -37,6 +38,16 @@ def _float(name: str, default: float) -> float:
         return default
 
 
+def _url(value: str) -> str:
+    """Normalize copied Markdown links before using a provider URL."""
+    value = value.strip().rstrip("/")
+    if value.startswith("[") and "](" in value and value.endswith(")"):
+        label, target = value[1:].split("](", 1)
+        if label == target[:-1]:
+            value = label
+    return value.rstrip("/")
+
+
 @dataclass(frozen=True)
 class GenerationProvider:
     """一套可提交并轮询视频任务的 API 凭据与地址。"""
@@ -44,6 +55,16 @@ class GenerationProvider:
     name: str
     api_key: str
     base_url: str
+
+
+@dataclass(frozen=True)
+class AgentModelConfig:
+    id: str
+    name: str
+    provider: str
+    base_url: str
+    api_key: str
+    supports_json: bool = True
 
 
 class Settings:
@@ -127,10 +148,8 @@ class Settings:
         # 也要够阿里云回源下载参考图，默认 6 小时
         self.media_link_ttl = _int("MEDIA_LINK_TTL_SECONDS", 6 * 3600)
 
-        # 多轮对话记忆：用文本大模型把历史提示词与本轮修改要求合并成完整提示词
+        # 上下文只保留开关和历史轮数；模型、URL、Key 统一使用 Agent 配置。
         self.context_enabled = _bool("CONTEXT_ENABLED", True)
-        self.context_model = os.getenv("CONTEXT_MODEL", "qwen-plus")
-        self.context_api_key = (os.getenv("CONTEXT_API_KEY") or "").strip()
         self.context_max_turns = _int("CONTEXT_MAX_TURNS", 6)
 
         # 创作智能体：计划只辅助编排，执行始终回到既有生成接口。
@@ -144,9 +163,53 @@ class Settings:
         self.agent_currency = os.getenv("AGENT_CURRENCY", "CNY")
         self.agent_rate_per_minute = _int("AGENT_RATE_PER_MINUTE", 6)
         self.agent_plan_ttl_minutes = _int("AGENT_PLAN_TTL_MINUTES", 60)
-
+        self.agent_default_model = os.getenv("AGENT_DEFAULT_MODEL", "").strip()
+        self.agent_models_json = os.getenv("AGENT_MODELS_JSON", "").strip()
+        self.agent_provider_configured = bool(
+            self.agent_models_json not in {"", "[]", "{}"}
+            or os.getenv("AGENT_BASE_URL", "").strip()
+            or os.getenv("AGENT_API_KEY", "").strip()
+        )
+        self.agent_provider = os.getenv("AGENT_PROVIDER", "openai").strip()
+        self.agent_base_url = (os.getenv("AGENT_BASE_URL", "").strip() or self.dashscope_base_url).rstrip("/")
+        self.agent_model = os.getenv("AGENT_MODEL", "qwen-plus").strip()
+        self.agent_api_key = (os.getenv("AGENT_API_KEY", "").strip() or self.api_keys["wan"])
+        self.agent_temperature = _float("AGENT_TEMPERATURE", 0.3)
+        self.agent_max_tokens = _int("AGENT_MAX_TOKENS", 2048)
+        self.agent_timeout_seconds = _int("AGENT_TIMEOUT_SECONDS", 60)
+        self.agent_max_repair_attempts = _int("AGENT_MAX_REPAIR_ATTEMPTS", 2)
+        self.agent_max_history_turns = _int("AGENT_MAX_HISTORY_TURNS", 8)
+        self.agent_daily_token_limit = _int("AGENT_DAILY_TOKEN_LIMIT", 200000)
+        self.agent_fallback_rules = _bool("AGENT_FALLBACK_RULES", False)
         frontend = os.getenv("FRONTEND_DIST")
         self.frontend_dist = Path(frontend) if frontend else BASE_DIR / "frontend" / "dist"
+
+    def agent_models(self) -> list[AgentModelConfig]:
+        """Parse server-only model credentials; never expose this object to clients."""
+        result: list[AgentModelConfig] = []
+        if self.agent_models_json:
+            try:
+                entries = json.loads(self.agent_models_json)
+            except json.JSONDecodeError:
+                logger.warning("AGENT_MODELS_JSON 不是有效 JSON，已忽略模型目录")
+                entries = []
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict) or not entry.get("id"):
+                        continue
+                    key = os.getenv(str(entry.get("api_key_env", "")), "").strip()
+                    result.append(AgentModelConfig(
+                        id=str(entry["id"]), name=str(entry.get("name", entry["id"])),
+                        provider=str(entry.get("provider", "openai")),
+                        base_url=_url(str(entry.get("base_url", ""))),
+                        api_key=key, supports_json=bool(entry.get("supports_json", True)),
+                    ))
+        if not result and self.agent_model and self.agent_provider_configured:
+            result.append(AgentModelConfig(
+                id=self.agent_model, name=self.agent_model, provider=self.agent_provider,
+                base_url=self.agent_base_url, api_key=self.agent_api_key,
+            ))
+        return result
 
     def api_key_for(self, key_group: str) -> str:
         return self.api_keys.get(key_group, "")

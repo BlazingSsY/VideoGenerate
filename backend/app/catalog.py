@@ -166,7 +166,14 @@ MODELS: List[VideoModel] = [
         allowed_roles=ROLE_ADMIN_ONLY,
         capabilities=[
             Capability(T2V, "只给提示词，不传任何素材"),
-            Capability(I2V, "以一张图作为视频首帧", "first_frame", 1, 1),
+            Capability(
+                I2V,
+                "以首帧图开始、以尾帧图结束视频；尾帧为可选输入",
+                media_inputs=[
+                    MediaInput("image", "first_frame", "首帧图", 1, 1, ".jpg,.jpeg,.png,.webp,.bmp", 20),
+                    MediaInput("end_frame", "last_frame", "尾帧图", 0, 1, ".jpg,.jpeg,.png,.webp,.bmp", 20),
+                ],
+            ),
             Capability(
                 R2V,
                 "传入参考图片、视频或音频，融合其中的主体、动作、风格与声音",
@@ -227,10 +234,11 @@ MODELS: List[VideoModel] = [
             ),
             Capability(
                 I2V,
-                "以一张图作为视频首帧；该方式比例恒为自适应，传其他值会被忽略",
-                "first_frame",
-                1,
-                1,
+                "以首帧图开始、以尾帧图结束视频；尾帧为可选输入，比例恒为自适应",
+                media_inputs=[
+                    MediaInput("image", "first_frame", "首帧图", 1, 1, ".jpg,.jpeg,.png,.webp,.heic,.heif", 30),
+                    MediaInput("end_frame", "last_frame", "尾帧图", 0, 1, ".jpg,.jpeg,.png,.webp,.heic,.heif", 30),
+                ],
                 supports_ratio=False,
             ),
             Capability(

@@ -10,9 +10,11 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // Dockerized frontend dev server needs the host gateway; local Vite keeps localhost.
+    host: '0.0.0.0',
     proxy: {
-      '/api': 'http://127.0.0.1:8008',
-      '/media': 'http://127.0.0.1:8008',
+      '/api': process.env.VITE_BACKEND_PROXY_TARGET || 'http://127.0.0.1:8008',
+      '/media': process.env.VITE_BACKEND_PROXY_TARGET || 'http://127.0.0.1:8008',
     },
   },
 })

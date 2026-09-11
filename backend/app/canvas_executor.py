@@ -4,6 +4,7 @@ from fastapi import HTTPException, Request
 from sqlalchemy.orm import Session
 
 from .catalog import get_model
+from .canvas_graph import media_handles
 from .models import Canvas, CanvasNode, Message, User
 from .routers.conversations import _validate
 from .schemas import GenerateRequest
@@ -36,13 +37,14 @@ def prepare_generation(
     capability = model.capability(capability_id) if model else None
     media_inputs: list[dict[str, str]] = []
     if model and capability:
+        handles = media_handles(node)
         for spec in capability.input_specs():
-            for index in range(spec.max_count):
-                handle = f"{spec.kind}_{index}"
+            connected_for_kind = sum(1 for handle in handles.get(spec.kind, []) if incoming.get(handle))
+            if connected_for_kind < spec.min_count:
+                raise HTTPException(status_code=400, detail=f"{spec.label} 至少需要 {spec.min_count} 个")
+            for handle in handles.get(spec.kind, []):
                 edge = incoming.get(handle)
                 if edge is None:
-                    if index < spec.min_count:
-                        raise HTTPException(status_code=400, detail=f"{handle} 未连接")
                     continue
                 source = nodes.get(edge.source)
                 url = str((source.data if source else {}).get("url", "")).strip()

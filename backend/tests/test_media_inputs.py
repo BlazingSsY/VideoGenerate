@@ -1,10 +1,22 @@
 import unittest
 
 from app.catalog import get_model
-from app.dashscope import _service_base_url, build_payload, is_insufficient_balance
+from app.dashscope import _chat_url, _service_base_url, build_payload, is_insufficient_balance
 
 
 class ModelMediaCapabilityTests(unittest.TestCase):
+    def test_only_wan_and_minimax_i2v_expose_end_frame(self):
+        for model_id in ("wan3.0-video-prime", "MiniMax/MiniMax-H3"):
+            model = get_model(model_id)
+            kinds = [item.kind for item in model.capability("i2v").input_specs()]
+            self.assertEqual(kinds, ["image", "end_frame"])
+
+        model = get_model("happyhorse-1.1-i2v")
+        self.assertEqual(
+            [item.kind for item in model.capability("i2v").input_specs()],
+            ["image"],
+        )
+
     def test_wan_reference_mode_exposes_image_video_and_audio_inputs(self):
         model = get_model("wan3.0-video-prime")
         capability = model.capability("r2v")
@@ -58,6 +70,25 @@ class DashScopeMixedMediaPayloadTests(unittest.TestCase):
             ],
         )
 
+    def test_i2v_payload_preserves_last_frame_provider_type(self):
+        payload = build_payload(
+            model="wan3.0-video-prime",
+            prompt="从首帧过渡到尾帧",
+            resolution="1080P",
+            duration=5,
+            media=[
+                {"type": "first_frame", "url": "https://example.com/start.png"},
+                {"type": "last_frame", "url": "https://example.com/end.png"},
+            ],
+        )
+        self.assertEqual(
+            payload["input"]["media"],
+            [
+                {"type": "first_frame", "url": "https://example.com/start.png"},
+                {"type": "last_frame", "url": "https://example.com/end.png"},
+            ],
+        )
+
 
 class HappyHorseProviderTests(unittest.TestCase):
     def test_compatible_mode_url_uses_the_same_host_for_async_video_tasks(self):
@@ -75,6 +106,20 @@ class HappyHorseProviderTests(unittest.TestCase):
         self.assertTrue(is_insufficient_balance({"message": "quota exhausted"}))
         self.assertFalse(is_insufficient_balance({"code": "InvalidApiKey"}))
         self.assertFalse(is_insufficient_balance({"code": "InvalidParameter"}))
+
+    def test_chat_url_accepts_common_openai_compatible_base_urls(self):
+        self.assertEqual(
+            _chat_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/chat/completions",
+        )
+        self.assertEqual(
+            _chat_url("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        )
+        self.assertEqual(
+            _chat_url("https://example.com/v1/chat/completions"),
+            "https://example.com/v1/chat/completions",
+        )
 
 
 if __name__ == "__main__":

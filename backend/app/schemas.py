@@ -117,7 +117,7 @@ class MessageOut(BaseModel):
 
 
 class ReferenceMedia(BaseModel):
-    kind: Literal["image", "video", "audio"]
+    kind: Literal["image", "end_frame", "video", "audio"]
     url: str = Field(min_length=1, max_length=4000)
     name: str = Field(default="", max_length=255)
 
@@ -155,6 +155,8 @@ class AgentPlanRequest(BaseModel):
     surface: Literal["studio", "canvas"]
     target_id: str = Field(default="", max_length=64)
     user_input: str = Field(min_length=1, max_length=4000)
+    agent_model_id: Optional[str] = Field(default=None, max_length=128)
+    target_duration: Optional[int] = Field(default=None, ge=1, le=600)
     autonomy: Literal["suggest", "confirm", "auto"] = "confirm"
     reference_media: List[ReferenceMedia] = []
 
@@ -171,11 +173,40 @@ class AgentTurnOut(BaseModel):
     expires_at: datetime
     created_at: datetime
     accepted_at: Optional[datetime] = None
+    agent_model_id: str = ""
+    warning: str = ""
+    tokens_in: int = 0
+    tokens_out: int = 0
+    repair_count: int = 0
 
 
 class AgentAcceptRequest(BaseModel):
     # UI can edit draft parameters, but all fields are revalidated at acceptance.
     plan: Optional[dict[str, Any]] = None
+    execute: bool = False
+
+
+class AgentTaskOut(BaseModel):
+    node_id: str
+    task_type: str
+    status: str
+    depends_on: list[str] = []
+    message_id: Optional[str] = None
+    output_file: str = ""
+    video_src: str = ""
+    error: str = ""
+
+
+class AgentRunOut(BaseModel):
+    id: str
+    turn_id: str
+    status: str
+    output_file: str = ""
+    video_src: str = ""
+    error: str = ""
+    created_at: datetime
+    updated_at: datetime
+    tasks: list[AgentTaskOut] = []
 
 
 class CanvasCreate(BaseModel):

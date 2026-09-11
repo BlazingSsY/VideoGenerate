@@ -8,7 +8,9 @@ import {
   Input,
   Layout,
   Modal,
+  Space,
   Spin,
+  Tag,
   Tooltip,
   Typography,
 } from 'antd'
@@ -28,7 +30,7 @@ import Composer, { stateForModel } from '../components/Composer'
 import type { ComposerState, RefMedia } from '../components/Composer'
 import MessageList from '../components/MessageList'
 import ModelInfo from '../components/ModelInfo'
-import type { AgentPlan, Conversation, MatrixRow, Message, ModeId, PromptSkill, VideoModel } from '../types'
+import type { AgentModel, AgentPlan, AgentRun, Conversation, MatrixRow, Message, ModeId, PromptSkill, VideoModel } from '../types'
 
 const { Sider, Content } = Layout
 
@@ -47,6 +49,12 @@ export default function Studio() {
   const [state, setState] = useState<ComposerState | null>(null)
   const [sending, setSending] = useState(false)
   const [agentPlan, setAgentPlan] = useState<AgentPlan | null>(null)
+  const [agentModels, setAgentModels] = useState<AgentModel[]>([])
+  const [agentEnabled, setAgentEnabled] = useState(false)
+  const [agentModelId, setAgentModelId] = useState('')
+  const [agentMode, setAgentMode] = useState<'suggest' | 'confirm' | 'auto'>('confirm')
+  const [agentTargetDuration, setAgentTargetDuration] = useState(30)
+  const [agentRun, setAgentRun] = useState<AgentRun | null>(null)
   const [planning, setPlanning] = useState(false)
   const [booting, setBooting] = useState(true)
   const [infoOpen, setInfoOpen] = useState(false)
@@ -79,10 +87,11 @@ export default function Studio() {
   useEffect(() => {
     ;(async () => {
       try {
-        const [modelRes, matrixRes, skillRes, convs] = await Promise.all([
+        const [modelRes, matrixRes, skillRes, agentModelRes, convs] = await Promise.all([
           api.get('/api/models'),
           api.get('/api/models/matrix'),
           api.get('/api/skills'),
+          api.get('/api/agent/models').catch(() => ({ data: [] })),
           loadConversations(),
         ])
         const list: VideoModel[] = modelRes.data.models
@@ -91,6 +100,8 @@ export default function Studio() {
         setModeLabels(modelRes.data.mode_labels || {})
         setMatrix(matrixRes.data.rows || [])
         setSkills((skillRes.data || []).filter((skill: PromptSkill) => skill.enabled))
+        setAgentModels(agentModelRes.data || [])
+        setAgentModelId(agentModelRes.data?.[0]?.id || '')
         if (list.length > 0) setState(stateForModel(list[0]))
         if (convs.length > 0) setActiveId(convs[0].id)
       } catch (error) {
@@ -121,6 +132,23 @@ export default function Studio() {
     }, 3000)
     return () => clearInterval(timer)
   }, [pending, activeId, loadMessages])
+
+  useEffect(() => {
+    if (!agentRun || !['queued', 'running'].includes(agentRun.status)) return
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await api.get(`/api/agent/runs/${agentRun.id}`)
+        setAgentRun(response.data)
+        if (response.data.status === 'succeeded') {
+          toast.success('Agent 视频任务已完成')
+          if (activeId) loadMessages(activeId).catch(() => undefined)
+        }
+      } catch {
+        // A transient status failure should not stop the execution poll.
+      }
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [activeId, agentRun, loadMessages, toast])
 
   useEffect(() => {
     const el = bodyRef.current
@@ -172,7 +200,15 @@ export default function Studio() {
     if (!state?.prompt.trim()) return
     setPlanning(true)
     try {
-      const response = await api.post('/api/agent/plans', { surface: 'studio', target_id: activeId || '', user_input: state.prompt, autonomy: 'confirm', reference_media: state.refMedia })
+      const response = await api.post('/api/agent/plans', {
+        surface: 'studio',
+        target_id: activeId || '',
+        user_input: state.prompt,
+        agent_model_id: agentModelId || null,
+        target_duration: agentTargetDuration,
+        autonomy: agentMode,
+        reference_media: state.refMedia,
+      })
       setAgentPlan(response.data)
     } catch (error) { toast.error(errorText(error, '智能体暂时不可用')) } finally { setPlanning(false) }
   }
@@ -180,12 +216,24 @@ export default function Studio() {
   const acceptAgentPlan = async () => {
     if (!agentPlan) return
     try {
-      const response = await api.post(`/api/agent/plans/${agentPlan.id}/accept`)
-      const item = response.data.plan.generations[0]
-      patch({ prompt: item.prompt, model: item.model, capability: item.capability, resolution: item.resolution, ratio: item.ratio, duration: item.duration, refMedia: item.reference_media || [] })
+      await api.post(`/api/agent/plans/${agentPlan.id}/accept`, { execute: true })
+      const run = await api.get(`/api/agent/plans/${agentPlan.id}/run`)
+      setAgentRun(run.data)
       setAgentPlan(null)
-      toast.success('计划已填入生成面板，请确认后运行')
+      patch({ prompt: '' })
+      toast.success('Agent 计划已接受，开始执行视频任务')
     } catch (error) { toast.error(errorText(error, '接受计划失败')) }
+  }
+
+  const retryAgentTask = async (nodeId: string) => {
+    if (!agentRun) return
+    try {
+      const response = await api.post(`/api/agent/runs/${agentRun.id}/tasks/${nodeId}/retry`)
+      setAgentRun(response.data)
+      toast.success(`已重新提交 ${nodeId}`)
+    } catch (error) {
+      toast.error(errorText(error, '重试失败'))
+    }
   }
 
   const retry = useCallback((assistant: Message) => {
@@ -383,8 +431,23 @@ export default function Studio() {
         </div>
         {state && models.length > 0 && (
           <>
-          {agentPlan && <div className="agent-plan"><strong>创作计划</strong><span>{agentPlan.plan.reason}</span><span>{agentPlan.plan.generations[0].model} · {agentPlan.est_seconds} 秒 · 约 ¥{agentPlan.est_cost}</span><Button size="small" type="primary" onClick={acceptAgentPlan}>接受并填入</Button><Button size="small" onClick={() => setAgentPlan(null)}>放弃</Button></div>}
-          <div className="agent-entry"><Button loading={planning} onClick={askAgent} disabled={!state.prompt.trim()}>获取创作建议</Button></div>
+          {agentPlan && <div className="agent-plan"><strong>{agentPlan.plan.title || '创作计划'}</strong><span>{agentPlan.plan.reason}</span><span>{agentPlan.plan.nodes.filter((node) => node.type === 'generate').length} 个镜头 · {agentPlan.est_seconds} 秒 · 约 ¥{agentPlan.est_cost}</span><Button size="small" type="primary" onClick={acceptAgentPlan}>接受并执行</Button><Button size="small" onClick={() => setAgentPlan(null)}>放弃</Button></div>}
+          {agentRun && (
+            <div className="agent-run-panel">
+              <Space wrap>
+                <strong>Agent 执行</strong>
+                <Tag color={agentRun.status === 'succeeded' ? 'success' : agentRun.status === 'failed' ? 'error' : 'processing'}>{agentRun.status}</Tag>
+                {agentRun.tasks.map((task) => (
+                  <span key={task.node_id}>
+                    <Tag>{task.node_id} · {task.status}</Tag>
+                    {task.status === 'failed' && <Button size="small" type="link" onClick={() => retryAgentTask(task.node_id)}>重试</Button>}
+                  </span>
+                ))}
+                {agentRun.video_src && <Button size="small" href={agentRun.video_src} target="_blank">查看成片</Button>}
+              </Space>
+              {agentRun.error && <Typography.Text type="danger">{agentRun.error}</Typography.Text>}
+            </div>
+          )}
           <Composer
             models={models}
             skills={skills}
@@ -395,6 +458,17 @@ export default function Studio() {
             maxDuration={maxDuration}
             maxUploadMb={config?.max_upload_mb ?? 20}
             publicBaseUsable={!!config?.public_base_url_usable}
+            agentModels={agentModels}
+            agentEnabled={agentEnabled}
+            agentModelId={agentModelId}
+            agentMode={agentMode}
+            agentTargetDuration={agentTargetDuration}
+            onAgentEnabledChange={setAgentEnabled}
+            onAgentModelChange={setAgentModelId}
+            onAgentModeChange={setAgentMode}
+            onAgentTargetDurationChange={setAgentTargetDuration}
+            onAgentPlan={askAgent}
+            planning={planning}
           />
           </>
         )}

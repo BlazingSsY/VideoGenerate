@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Handle, Position, type NodeProps, useUpdateNodeInternals } from '@xyflow/react'
 import { Alert, App as AntApp, Button, Input, Select, Space, Switch, Tag, Tooltip, Typography } from 'antd'
-import { DownloadOutlined, PlayCircleOutlined } from '@ant-design/icons'
+import { DeleteOutlined, DownloadOutlined, PlusOutlined, PlayCircleOutlined } from '@ant-design/icons'
 
 import type { CanvasFlowNode, GenerateNodeData } from '../../canvasTypes'
 import { useModelParams } from '../../hooks/useModelParams'
@@ -43,7 +43,7 @@ function Port({
         id={id}
         type="target"
         position={Position.Left}
-        className={`canvas-handle ${kind}`}
+        className={`canvas-handle ${kind === 'end_frame' ? 'image' : kind}`}
       />
       <span className="canvas-port-label">
         {label}
@@ -61,6 +61,9 @@ function MediaPortGroup({
   minCount,
   maxCount,
   wired,
+  handles,
+  onAdd,
+  onRemove,
 }: {
   kind: MediaKind
   label: string
@@ -68,21 +71,20 @@ function MediaPortGroup({
   minCount: number
   maxCount: number
   wired: Set<string>
+  handles: string[]
+  onAdd: () => void
+  onRemove: (handle: string) => void
 }) {
-  const connectedCount = Array.from(
-    { length: maxCount },
-    (_, index) => wired.has(`${kind}_${index}`),
-  ).filter(Boolean).length
+  const connectedCount = handles.filter((handle) => wired.has(handle)).length
 
   return (
     <div className={`canvas-media-port-group ${kind}`}>
       <div className="canvas-media-port-head">
         <span>{label}</span>
-        <span>{connectedCount}/{maxCount}</span>
+        <span>{connectedCount}/{maxCount} {handles.length < maxCount && <Button type="text" size="small" icon={<PlusOutlined />} onClick={onAdd} aria-label={`添加${label}`} />}</span>
       </div>
       <div className="canvas-media-slots">
-        {Array.from({ length: maxCount }, (_, index) => {
-          const handle = `${kind}_${index}`
+        {handles.map((handle, index) => {
           const isConnected = wired.has(handle)
           const required = index < minCount
           return (
@@ -95,10 +97,11 @@ function MediaPortGroup({
                 id={handle}
                 type="target"
                 position={Position.Left}
-                className={`canvas-handle ${kind}`}
+                className={`canvas-handle ${kind === 'end_frame' ? 'image' : kind}`}
               />
               <span>{index + 1}</span>
               {required && <em>*</em>}
+              {!required && <Button type="text" size="small" icon={<DeleteOutlined />} onClick={() => onRemove(handle)} aria-label={`删除${label}${index + 1}`} />}
             </div>
           )
         })}
@@ -110,7 +113,7 @@ function MediaPortGroup({
 
 export default function GenerateNode({ id, data, selected }: NodeProps<CanvasFlowNode>) {
   const { message } = AntApp.useApp()
-  const { models, runtime, connected, updateNodeData, runNode } = useCanvasNodeContext()
+  const { models, runtime, connected, updateNodeData, removeEdgesForHandle, runNode } = useCanvasNodeContext()
   const value = data as GenerateNodeData
   const state: ModelParamState = {
     model: value.model,
@@ -131,8 +134,9 @@ export default function GenerateNode({ id, data, selected }: NodeProps<CanvasFlo
   const wired = connected[id] ?? new Set<string>()
   const updateNodeInternals = useUpdateNodeInternals()
   const mediaSpecs = capability ? capabilityMediaInputs(capability) : []
+  const declaredSlots = value.media_slots || {}
   const mediaHandleSignature = mediaSpecs
-    .map((spec) => `${spec.kind}:${spec.max_count}`)
+    .map((spec) => `${spec.kind}:${(declaredSlots[spec.kind] || []).join(',')}`)
     .join('|')
 
   useEffect(() => {
@@ -197,6 +201,11 @@ export default function GenerateNode({ id, data, selected }: NodeProps<CanvasFlo
           connected={wired.has('prompt')}
         />
         {mediaSpecs.map((spec) => (
+          (() => {
+            const legacyHandles = Array.from({ length: spec.min_count }, (_, index) => `${spec.kind}_${index}`)
+            const connectedHandles = Array.from(wired).filter((handle) => handle.startsWith(`${spec.kind}_`))
+            const handles = Array.from(new Set([...(declaredSlots[spec.kind] || []), ...legacyHandles, ...connectedHandles])).slice(0, spec.max_count)
+            return (
           <MediaPortGroup
             key={spec.kind}
             kind={spec.kind}
@@ -205,7 +214,12 @@ export default function GenerateNode({ id, data, selected }: NodeProps<CanvasFlo
             minCount={spec.min_count}
             maxCount={spec.max_count}
             wired={wired}
+            handles={handles}
+            onAdd={() => updateNodeData(id, { media_slots: { ...declaredSlots, [spec.kind]: [...handles, `${spec.kind}_${handles.length}`] } })}
+            onRemove={(handle) => { removeEdgesForHandle(id, handle); updateNodeData(id, { media_slots: { ...declaredSlots, [spec.kind]: handles.filter((item) => item !== handle) } }) }}
           />
+            )
+          })()
         ))}
       </div>
 

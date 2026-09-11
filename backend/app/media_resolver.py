@@ -69,7 +69,7 @@ def describe_upload_mode(model: VideoModel, kind: str = "image") -> str:
     """说明本机素材会以公网 URL、Base64 还是无法提交。"""
     if public_base_url_usable():
         return "public_url"
-    if kind == "image" and model.supports_base64_media:
+    if kind in {"image", "end_frame"} and model.supports_base64_media:
         return "base64"
     return "unavailable"
 
@@ -81,7 +81,7 @@ def _resolve_url(url: str, model: VideoModel, kind: str) -> str:
         return url
     if use_public:
         return absolute_signed(url)
-    if kind == "image" and model.supports_base64_media:
+    if kind in {"image", "end_frame"} and model.supports_base64_media:
         return _to_data_uri(url[len(LOCAL_PREFIX):])
     label = {"image": "图片", "video": "视频", "audio": "音频"}.get(kind, "素材")
     raise MediaError(

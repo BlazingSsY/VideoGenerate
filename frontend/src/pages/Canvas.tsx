@@ -16,15 +16,20 @@ import '@xyflow/react/dist/style.css'
 import { nanoid } from 'nanoid'
 import {
   App as AntApp,
+  Alert,
   Button,
+  Card,
+  Divider,
   Drawer,
   Dropdown,
   Empty,
   Input,
   Layout,
   Modal,
+  Select,
   Space,
   Spin,
+  Tag,
   Tooltip,
   Typography,
 } from 'antd'
@@ -40,6 +45,7 @@ import {
   ThunderboltOutlined,
   VideoCameraOutlined,
   ExportOutlined,
+  RobotOutlined,
 } from '@ant-design/icons'
 
 import api, { errorText } from '../api'
@@ -62,7 +68,7 @@ import OutputNode from '../components/nodes/OutputNode'
 import PromptNode from '../components/nodes/PromptNode'
 import { defaultModelParams } from '../hooks/useModelParams'
 import { capabilityMediaInputs } from '../mediaCapabilities'
-import type { VideoModel } from '../types'
+import type { AgentModel, AgentPlan, VideoModel } from '../types'
 
 const { Sider, Content } = Layout
 const nodeTypes = {
@@ -91,11 +97,14 @@ function inputType(node: CanvasFlowNode | undefined, handle: string | null, mode
   const model = models.find((item) => item.id === data.model)
   const capability = model?.capabilities.find((item) => item.id === data.capability)
   if (!capability) return null
+  const declared = data.media_slots
   for (const spec of capabilityMediaInputs(capability)) {
     const prefix = `${spec.kind}_`
     if (!handle.startsWith(prefix)) continue
     const index = Number(handle.slice(prefix.length))
-    return Number.isInteger(index) && index >= 0 && index < spec.max_count ? spec.kind : null
+    if (!Number.isInteger(index) || index < 0 || index >= spec.max_count) return null
+    if (declared && Array.isArray(declared[spec.kind]) && !declared[spec.kind]!.includes(handle)) return null
+    return spec.kind === 'end_frame' ? 'image' : spec.kind
   }
   return null
 }
@@ -116,6 +125,14 @@ function CanvasWorkspace() {
   const [title, setTitle] = useState('')
   const isNarrow = useIsNarrow()
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [agentOpen, setAgentOpen] = useState(false)
+  const [agentModels, setAgentModels] = useState<AgentModel[]>([])
+  const [agentModelId, setAgentModelId] = useState<string>()
+  const [agentTargetDuration, setAgentTargetDuration] = useState<number | undefined>(30)
+  const [agentPrompt, setAgentPrompt] = useState('')
+  const [agentPlan, setAgentPlan] = useState<AgentPlan | null>(null)
+  const [agentPlanning, setAgentPlanning] = useState(false)
+  const [agentError, setAgentError] = useState('')
   const versionsRef = useRef<Record<string, string>>({})
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const activeIdRef = useRef<string | null>(null)
@@ -132,8 +149,12 @@ function CanvasWorkspace() {
   useEffect(() => {
     ;(async () => {
       try {
-        const [modelResponse, list] = await Promise.all([api.get('/api/models'), refreshCanvases()])
+        const [modelResponse, list, agentResponse] = await Promise.all([
+          api.get('/api/models'), refreshCanvases(), api.get('/api/agent/models').catch(() => ({ data: [] })),
+        ])
         setModels(modelResponse.data.models)
+        setAgentModels(agentResponse.data || [])
+        setAgentModelId(agentResponse.data?.[0]?.id)
         if (list.length) setActiveId(list[0].id)
       } catch (error) {
         message.error(errorText(error, '画布初始化失败'))
@@ -342,6 +363,10 @@ function CanvasWorkspace() {
     }
   }, [edges, message, models, nodes, setEdges, setNodes])
 
+  const removeEdgesForHandle = useCallback((nodeId: string, handle: string) => {
+    setEdges((current) => current.filter((edge) => !(edge.target === nodeId && edge.targetHandle === handle)))
+  }, [setEdges])
+
   const runNode = useCallback(async (nodeId: string) => {
     if (!activeId) return
     try {
@@ -460,6 +485,67 @@ function CanvasWorkspace() {
     }
   }
 
+  const askAgent = async () => {
+    if (!activeId || !agentPrompt.trim()) return
+    if (!agentModels.length) {
+      setAgentError('当前没有可用的 Agent 模型。请在服务器 .env 中配置 AGENT_MODELS_JSON，或填写 AGENT_BASE_URL、AGENT_MODEL 和 AGENT_API_KEY。')
+      return
+    }
+    setAgentPlanning(true)
+    setAgentError('')
+    setAgentPlan(null)
+    try {
+      const response = await api.post('/api/agent/plans', {
+        surface: 'canvas', target_id: activeId, user_input: agentPrompt.trim(),
+        agent_model_id: agentModelId || null, target_duration: agentTargetDuration || null,
+        autonomy: 'confirm', reference_media: [],
+      })
+      setAgentPlan(response.data)
+    } catch (error) {
+      const detail = errorText(error, 'Agent 规划失败')
+      setAgentError(detail)
+      message.error(detail)
+    }
+    finally { setAgentPlanning(false) }
+  }
+
+  const applyAgentPlan = async () => {
+    if (!activeId || !agentPlan) return
+    try {
+      const response = await api.post(`/api/agent/plans/${agentPlan.id}/accept`)
+      const accepted = response.data as AgentPlan
+      if (accepted.plan.nodes.some((item) => item.type === 'compose')) {
+        throw new Error('当前画布暂不支持自动写入合成节点，请先在计划中使用单段视频')
+      }
+      const generated = accepted.plan.nodes.filter((item) => item.type === 'generate')
+      const additions: CanvasFlowNode[] = []
+      const newEdges: CanvasFlowEdge[] = []
+      generated.forEach((item, index) => {
+        if (!item.prompt || !item.model || !item.capability || !item.resolution || !item.duration) return
+        const promptId = nanoid()
+        const generateId = nanoid()
+        additions.push({ id: promptId, type: 'prompt', position: { x: 80, y: index * 360 }, data: { text: item.prompt } })
+        additions.push({ id: generateId, type: 'generate', position: { x: 470, y: index * 360 }, data: {
+          model: item.model, capability: item.capability, resolution: item.resolution,
+          ratio: item.ratio || '', duration: item.duration, watermark: false, audio: true,
+          inlinePrompt: '', media_slots: {},
+        } })
+        newEdges.push({ id: nanoid(), source: promptId, sourceHandle: 'out', target: generateId, targetHandle: 'prompt' })
+      })
+      if (!additions.length) throw new Error('计划中没有可执行的生成节点')
+      const outputId = nanoid()
+      const generatedNodes = additions.filter((node) => node.type === 'generate')
+      const lastGenerate = generatedNodes[generatedNodes.length - 1]
+      additions.push({ id: outputId, type: 'output', position: { x: 900, y: Math.max(0, generated.length - 1) * 360 }, data: { label: accepted.plan.title || 'Agent 输出' } })
+      if (lastGenerate) newEdges.push({ id: nanoid(), source: lastGenerate.id, sourceHandle: 'out', target: outputId, targetHandle: 'in' })
+      setNodes((current) => [...current, ...additions])
+      setEdges((current) => [...current, ...newEdges])
+      setAgentPlan(null)
+      setAgentPrompt('')
+      message.success('计划已应用到画布')
+    } catch (error) { message.error(errorText(error, '应用 Agent 计划失败')) }
+  }
+
   const providerValue = useMemo(() => ({
     models,
     maxUploadMb: config?.max_upload_mb ?? 20,
@@ -468,6 +554,7 @@ function CanvasWorkspace() {
     connected,
     incoming,
     updateNodeData,
+    removeEdgesForHandle,
     runNode,
   }), [
     config?.max_upload_mb,
@@ -478,6 +565,7 @@ function CanvasWorkspace() {
     runNode,
     runtime,
     updateNodeData,
+    removeEdgesForHandle,
   ])
 
   if (loading && !activeId) return <div className="canvas-loading"><Spin size="large" /></div>
@@ -546,7 +634,7 @@ function CanvasWorkspace() {
         ) : (
           <>
             <div className="canvas-toolbar">
-              <Space size={8}>
+              <div className="canvas-toolbar-title-group">
                 {isNarrow && (
                   <Button size="small" icon={<MenuOutlined />} onClick={() => setDrawerOpen(true)} />
                 )}
@@ -556,8 +644,8 @@ function CanvasWorkspace() {
                     {saveState === 'saving' ? '保存中…' : saveState === 'saved' ? '已保存' : saveState === 'conflict' ? '版本冲突' : '保存失败'}
                   </span>
                 </Tooltip>
-              </Space>
-              <Space size={8} className="canvas-toolbar-actions">
+              </div>
+              <div className="canvas-toolbar-actions">
                 <Tooltip title="提示词节点">
                   <Button icon={<FontSizeOutlined />} onClick={() => addNode('prompt')}>
                     <span className="canvas-btn-text">提示词</span>
@@ -594,7 +682,12 @@ function CanvasWorkspace() {
                     <span className="canvas-btn-text">输出</span>
                   </Button>
                 </Tooltip>
-              </Space>
+                <Tooltip title="打开 Agent 规划面板">
+                  <Button icon={<RobotOutlined />} onClick={() => setAgentOpen(true)}>
+                    <span className="canvas-btn-text">Agent</span>
+                  </Button>
+                </Tooltip>
+              </div>
             </div>
             <CanvasNodeProvider value={providerValue}>
               <ReactFlow
@@ -623,6 +716,65 @@ function CanvasWorkspace() {
           </>
         )}
       </Content>
+
+      <Drawer
+        title="Agent 画布规划"
+        placement="right"
+        width={isNarrow ? '100%' : 390}
+        open={agentOpen}
+        onClose={() => { setAgentOpen(false); setAgentError('') }}
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          {!agentModels.length && (
+            <Alert
+              type="warning"
+              showIcon
+              message="Agent 尚未配置"
+              description="请在后端 .env 中配置 AGENT_MODELS_JSON，或使用单模型兼容配置 AGENT_BASE_URL、AGENT_MODEL、AGENT_API_KEY，然后重启服务。"
+            />
+          )}
+          {agentError && <Alert type="error" showIcon message="Agent 规划失败" description={agentError} closable onClose={() => setAgentError('')} />}
+          <Select placeholder="Agent 模型" value={agentModelId} onChange={setAgentModelId} options={agentModels.map((item) => ({ value: item.id, label: item.name }))} disabled={!agentModels.length} />
+          <Select allowClear placeholder="目标总时长" value={agentTargetDuration} onChange={setAgentTargetDuration} options={[15, 30, 45, 60].map((value) => ({ value, label: `${value} 秒` }))} />
+          <Input.TextArea rows={5} value={agentPrompt} onChange={(event) => setAgentPrompt(event.target.value)} placeholder="描述你要编排的画布视频，例如：制作一段 45 秒的产品宣传片" />
+          <Button type="primary" icon={<RobotOutlined />} loading={agentPlanning} disabled={!agentPrompt.trim() || !agentModels.length} onClick={askAgent} block>规划画布</Button>
+          {agentPlan && <Card className="agent-canvas-plan" bordered={false}>
+            <div className="agent-plan-heading">
+              <div>
+                <Typography.Text className="agent-plan-kicker">TIMELINE &amp; SHOTS</Typography.Text>
+                <Typography.Title level={5}>{agentPlan.plan.title || '计划预览'}</Typography.Title>
+              </div>
+              <Tag color="processing">{agentPlan.plan.target_duration || agentPlan.est_seconds} 秒</Tag>
+            </div>
+            <Typography.Paragraph type="secondary" className="agent-plan-reason">{agentPlan.plan.reason}</Typography.Paragraph>
+            <div className="agent-plan-summary">
+              <span>{agentPlan.plan.nodes.filter((item) => item.type === 'generate').length} 个镜头</span>
+              <span>{agentPlan.est_seconds} 秒生成时长</span>
+              <span>约 ¥{agentPlan.est_cost}</span>
+            </div>
+            <Divider />
+            <div className="agent-plan-timeline">
+              {agentPlan.plan.nodes.map((item, index) => (
+                <div className="agent-plan-shot" key={item.id}>
+                  <div className="agent-plan-shot-marker">{String(index + 1).padStart(2, '0')}</div>
+                  <div className="agent-plan-shot-body">
+                    <div className="agent-plan-shot-head">
+                      <strong>{item.type === 'compose' ? '最终成片 · 顺序拼接' : `Shot ${index + 1} · ${item.duration || 0} 秒`}</strong>
+                      {item.type === 'generate' && item.model && <Tag>{item.model}</Tag>}
+                    </div>
+                    <Typography.Text>{item.prompt || (item.type === 'compose' ? `合并 ${item.inputs?.length || 0} 个镜头` : '')}</Typography.Text>
+                    {item.depends_on?.length ? <Typography.Text type="secondary">依赖：{item.depends_on.join('、')}</Typography.Text> : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <Space className="agent-plan-actions">
+              <Button type="primary" onClick={applyAgentPlan}>接受并应用</Button>
+              <Button onClick={() => setAgentPlan(null)}>放弃</Button>
+            </Space>
+          </Card>}
+        </Space>
+      </Drawer>
 
       <Modal
         open={renaming}

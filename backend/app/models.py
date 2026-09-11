@@ -183,6 +183,7 @@ class AgentTurn(Base):
     session_id: Mapped[str] = mapped_column(ForeignKey("agent_sessions.id", ondelete="CASCADE"), index=True)
     user_input: Mapped[str] = mapped_column(Text)
     skill_id: Mapped[str] = mapped_column(String(64), default="")
+    agent_model_id: Mapped[str] = mapped_column(String(128), default="")
     plan: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
     est_cost: Mapped[float] = mapped_column(Float, default=0)
@@ -190,3 +191,36 @@ class AgentTurn(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    tokens_in: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+    repair_count: Mapped[int] = mapped_column(Integer, default=0)
+    warning: Mapped[str] = mapped_column(Text, default="")
+
+
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    turn_id: Mapped[str] = mapped_column(ForeignKey("agent_turns.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    output_file: Mapped[str] = mapped_column(String(255), default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
+class AgentTask(Base):
+    __tablename__ = "agent_tasks"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True)
+    node_id: Mapped[str] = mapped_column(String(64), index=True)
+    task_type: Mapped[str] = mapped_column(String(16))  # generate | compose
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    depends_on: Mapped[list] = mapped_column(JSON, default=list)
+    message_id: Mapped[str | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"), nullable=True)
+    output_file: Mapped[str] = mapped_column(String(255), default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)

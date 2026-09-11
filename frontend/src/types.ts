@@ -19,7 +19,7 @@ export interface PromptSkill {
 }
 
 export type ModeId = 't2v' | 'i2v' | 'r2v'
-export type MediaKind = 'image' | 'video' | 'audio'
+export type MediaKind = 'image' | 'end_frame' | 'video' | 'audio'
 
 export interface MediaInputSpec {
   kind: MediaKind
@@ -138,9 +138,34 @@ export interface AgentPlan {
   target_id: string
   status: string
   skill_id: string
-  plan: { generations: Array<{ prompt: string; model: string; capability: ModeId; resolution: string; ratio: string; duration: number; reference_media: ReferenceMedia[]; reason: string }>; reason: string }
+  plan: { title: string; target_duration: number; nodes: Array<{ id: string; type: 'generate' | 'compose'; prompt?: string; model?: string; capability?: ModeId; resolution?: string; ratio?: string; duration?: number; reference_media?: ReferenceMedia[]; depends_on?: string[]; inputs?: string[]; reason?: string }>; reason: string }
   est_cost: number
   est_seconds: number
+}
+
+export interface AgentModel { id: string; name: string; supports_json: boolean }
+
+export interface AgentRunTask {
+  node_id: string
+  task_type: 'generate' | 'compose'
+  status: 'queued' | 'running' | 'succeeded' | 'failed'
+  depends_on: string[]
+  message_id?: string | null
+  output_file: string
+  video_src: string
+  error: string
+}
+
+export interface AgentRun {
+  id: string
+  turn_id: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed'
+  output_file: string
+  video_src: string
+  error: string
+  created_at: string
+  updated_at: string
+  tasks: AgentRunTask[]
 }
 
 export const MODE_COLORS: Record<ModeId, string> = {

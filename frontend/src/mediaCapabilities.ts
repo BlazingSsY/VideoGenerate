@@ -41,5 +41,5 @@ export function filterMediaForCapability(items: ReferenceMedia[], capability: Ca
 }
 
 export function mediaKindLabel(kind: MediaKind) {
-  return { image: '图片', video: '视频', audio: '音频' }[kind]
+  return { image: '图片', end_frame: '尾帧图', video: '视频', audio: '音频' }[kind]
 }

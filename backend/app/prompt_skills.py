@@ -4,6 +4,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from .config import settings
+from .agent_provider import AgentError, context_model
 from .dashscope import chat
 from .models import PromptSkill
 
@@ -36,8 +37,10 @@ async def enhance_prompt(prompt: str, instructions: str, api_key: str) -> str:
     if not instructions:
         return prompt
 
-    key = settings.context_api_key or api_key
-    if not key:
+    try:
+        provider = context_model()
+    except AgentError as exc:
+        logger.warning("Agent 未配置，跳过 Skill 增强：%s", exc)
         return prompt
 
     system_prompt = (
@@ -49,12 +52,13 @@ async def enhance_prompt(prompt: str, instructions: str, api_key: str) -> str:
     )
     try:
         content = await chat(
-            key,
-            settings.context_model,
+            provider.api_key,
+            provider.id,
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
+            base_url=provider.base_url,
         )
     except Exception as exc:  # Skill 是增强项，不应让主生成链路失败
         logger.warning("Skill 提示词增强失败，回退原提示词：%s", exc)

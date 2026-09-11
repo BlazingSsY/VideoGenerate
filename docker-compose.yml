@@ -1,7 +1,7 @@
 services:
   video-generate:
     build: .
-    image: video-generate:latest
+    image: video-generate:1.5
     container_name: video-generate
     restart: unless-stopped
     ports:

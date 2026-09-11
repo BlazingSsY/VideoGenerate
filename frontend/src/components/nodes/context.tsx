@@ -11,6 +11,7 @@ interface CanvasNodeContextValue {
   connected: Record<string, Set<string>>   // nodeId -> 已连线的输入槽
   incoming: Record<string, Record<string, string>> // nodeId -> handle -> source node id
   updateNodeData: (nodeId: string, patch: Partial<CanvasNodeData>) => void
+  removeEdgesForHandle: (nodeId: string, handle: string) => void
   runNode: (nodeId: string) => Promise<void>
 }
 

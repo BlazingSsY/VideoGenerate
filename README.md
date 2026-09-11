@@ -29,7 +29,7 @@
 三种生成方式的区别：
 
 - **文生视频 (t2v)** — 只给文字提示词，模型凭空生成画面，不传任何素材。
-- **图生视频 (i2v)** — 上传 1 张图作为视频首帧让画面动起来，接口字段 `media[].type = first_frame`。happyhorse-1.1-i2v 的画面比例自动跟随首帧图，**没有 ratio 参数**。
+- **图生视频 (i2v)** — 上传 1 张图作为视频首帧让画面动起来，接口字段 `media[].type = first_frame`。Wan 3 与 MiniMax H3 还支持可选尾帧图（`media[].type = last_frame`）；HappyHorse 1.1 仅支持单首帧图。happyhorse-1.1-i2v 的画面比例自动跟随首帧图，**没有 ratio 参数**。
 - **参考生视频 (r2v)** — 上传多张参考图，模型融合其中的人物、道具与风格；提示词里用 `[Image 1]`、`[Image 2]` 按上传顺序指名引用。happyhorse/wan 用 `reference_image`，MiniMax 用 `image_url`。
 
 几处容易踩坑的差异（均已在后端强制校验）：
@@ -37,7 +37,7 @@
 - MiniMax H3 只有 **768P 和 2K**，没有 1080P（官方档位就这两档）；文生视频时**不能用 adaptive 比例**，图生视频时比例恒为自适应、界面上不提供选择；时长最短 4 秒。
 - HappyHorse 系列**不支持 adaptive 比例**，水印默认**开**；wan 与 MiniMax 水印默认关。
 - wan3.0-video-prime 官方时长上限 30 秒，被系统的 `MAX_VIDEO_DURATION` 收窄到 15 秒。
-- wan 与 MiniMax 官方还支持尾帧控制、参考视频、参考音频、视频编辑等，本系统暂未开放，界面的「模型能力说明」里有标注。
+- wan 与 MiniMax 官方还支持尾帧控制、参考视频、参考音频、视频编辑等；当前系统的图生视频已开放首帧/尾帧输入，HappyHorse 仍仅开放单首帧。
 
 登录后点左侧「模型能力说明」可以在界面里查看这张对照表和每个模型的完整参数范围。
 
@@ -94,11 +94,11 @@ docker compose down
 ### 不用 compose
 
 ```bash
-docker build -t video-generate:latest .
+docker build --build-arg APP_VERSION=1.5 -t video-generate:1.5 .
 ```
 
 ```bash
-docker run -d --name video-generate -p 8008:8008 --env-file .env -v $(pwd)/data:/app/data --restart unless-stopped video-generate:latest
+docker run -d --name video-generate -p 8008:8008 --env-file .env -v $(pwd)/data:/app/data --restart unless-stopped video-generate:1.5
 ```
 
 ## 本地开发
@@ -117,6 +117,26 @@ uvicorn backend.app.main:app --reload --port 8008
 
 ```bash
 cd frontend && npm install && npm run dev
+```
+
+## 版本交付包
+
+每次发布新的 Docker 镜像版本后，完整交付包会放在 `artifacts/release-<版本号>/`。
+交付包包含镜像归档、Compose 配置、Dockerfile、部署配置、环境变量模板和校验文件，不包含真实 `.env`、API Key、数据库或 `data/` 文件。
+
+当前版本交付包：`artifacts/release-1.5/`
+
+本地使用交付包时，进入该目录，先复制 `env.example` 为 `.env` 并填写配置，然后执行：
+
+```bash
+docker load -i video-generate-1.5-amd64.tar.gz
+docker compose up -d
+```
+
+访问 `http://localhost:8008`。停止服务：
+
+```bash
+docker compose down
 ```
 
 开发时访问 `http://localhost:5173`，Vite 会把 `/api` 与 `/media` 代理到 8008 端口。
@@ -150,8 +170,7 @@ cd frontend && npm install && npm run dev
 | `VIDEO_RETENTION_DAYS` | 7 | 视频保留天数，超期自动删除文件。0 = 不清理 |
 | `CLEANUP_INTERVAL_HOURS` | 6 | 清理任务运行间隔（小时） |
 | `CONTEXT_ENABLED` | true | 是否用文本模型合并多轮提示词 |
-| `CONTEXT_MODEL` | qwen-plus | 用于合并提示词的文本模型 |
-| `CONTEXT_API_KEY` | 空 | 留空则复用当前视频模型所属分组的 Key |
+| `CONTEXT_ENABLED` | true | 是否启用上下文记忆；启用后统一使用 `AGENT_DEFAULT_MODEL` 的模型、URL 和 Key |
 | `CONTEXT_MAX_TURNS` | 6 | 往前追溯的对话轮数 |
 | `DATA_DIR` | ./data | 数据库、上传图片、视频的存放目录 |
 

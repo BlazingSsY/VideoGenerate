@@ -323,7 +323,7 @@ agent_turns
 
 ## 9. 大模型配置（`.env`）
 
-兼容 OpenAI Chat Completions 协议，百炼兼容模式、DeepSeek、OpenAI、本地 Ollama / vLLM 都能接。
+兼容 OpenAI Chat Completions 协议，百炼兼容模式、DeepSeek、OpenAI、本地 Ollama / vLLM 都能接。系统只保留两条模型链：Agent 模型统一负责任务规划、上下文记忆和 Skill 增强；视频模型负责具体视频生成。
 
 ```ini
 # ===== 创作智能体 =====
@@ -343,7 +343,7 @@ AGENT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 # 可选：qwen-plus / qwen-max / deepseek-chat / gpt-4o-mini
 AGENT_MODEL=qwen-plus
 
-# 留空则复用 DASHSCOPE_API_KEY_WAN
+# Agent 模型的 Key。多模型配置时改用各条目的 api_key_env。
 AGENT_API_KEY=
 
 AGENT_TEMPERATURE=0.3
@@ -371,11 +371,15 @@ AGENT_MAX_REPAIR_ATTEMPTS=2
 AGENT_MAX_HISTORY_TURNS=8
 ```
 
+### 上下文记忆配置
+
+上下文记忆不再单独配置模型、URL 或 Key。`CONTEXT_ENABLED` 和 `CONTEXT_MAX_TURNS` 只控制开关与历史轮数；启用后统一调用 `AGENT_DEFAULT_MODEL` 对应的 Agent 配置。这样任务规划、会话记忆和 Skill 增强共享同一套模型连接信息。
+
 ### 设计取舍
 
 | 问题 | 答案 |
 | --- | --- |
-| 为什么不复用 `CONTEXT_*` | 那套是「提示词合并」的窄用途，小模型够用。智能体要 function calling 和稳定 JSON，能力要求不同，该独立配、独立换 |
+| 为什么统一使用 Agent 模型 | 任务规划、提示词记忆和 Skill 增强共享同一套上下文，避免多套模型配置导致语义不一致 |
 | 为什么用 OpenAI 兼容协议 | 不锁死阿里云。换 DeepSeek 省钱、用本地模型避免数据出网，改两行就行 |
 | 为什么 `AGENT_API_KEY` 可留空 | 本机和小规模部署少填一项 |
 | Docker 接本地 Ollama | 容器里的 `localhost` 是容器自己。用 `host.docker.internal`，compose 加 `extra_hosts: ["host.docker.internal:host-gateway"]` |

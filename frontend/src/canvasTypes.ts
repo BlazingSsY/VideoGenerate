@@ -35,6 +35,7 @@ export interface GenerateNodeData extends Record<string, unknown> {
   watermark: boolean
   audio: boolean
   inlinePrompt: string
+  media_slots?: Partial<Record<MediaKind, string[]>>
 }
 
 export type CanvasNodeData =
