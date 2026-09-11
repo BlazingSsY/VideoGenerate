@@ -68,7 +68,7 @@ def models(user: User = Depends(current_user)):
 
 
 @router.post("/plans", response_model=AgentTurnOut, status_code=201)
-def plan(payload: AgentPlanRequest, request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
+async def plan(payload: AgentPlanRequest, request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
     if not settings.agent_enabled:
         raise HTTPException(status_code=503, detail="智能体暂时不可用")
     try:
@@ -76,7 +76,7 @@ def plan(payload: AgentPlanRequest, request: Request, db: Session = Depends(get_
         selected_agent_model_id = payload.agent_model_id
         if provider_configured or payload.agent_model_id:
             selected_agent_model_id = resolve_model(payload.agent_model_id).id
-        skill_id, value, provider_result, warning = create_plan(
+        skill_id, value, provider_result, warning = await create_plan(
             user, payload.user_input, [item.model_dump() for item in payload.reference_media],
             payload.surface, selected_agent_model_id, payload.target_duration,
         )
@@ -91,7 +91,7 @@ def plan(payload: AgentPlanRequest, request: Request, db: Session = Depends(get_
                     f"原计划未通过后端校验：{first_error.detail}。请修正后只输出完整 JSON 计划。\n"
                     f"原始用户目标：{payload.user_input}"
                 )
-                repaired = provider_plan(
+                repaired = await provider_plan(
                     selected_agent_model_id,
                     AGENT_SYSTEM_PROMPT,
                     repair_prompt,

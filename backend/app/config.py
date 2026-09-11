@@ -169,6 +169,7 @@ class Settings:
             self.agent_models_json not in {"", "[]", "{}"}
             or os.getenv("AGENT_BASE_URL", "").strip()
             or os.getenv("AGENT_API_KEY", "").strip()
+            or self.api_keys.get("wan", "")
         )
         self.agent_provider = os.getenv("AGENT_PROVIDER", "openai").strip()
         self.agent_base_url = (os.getenv("AGENT_BASE_URL", "").strip() or self.dashscope_base_url).rstrip("/")
@@ -180,7 +181,7 @@ class Settings:
         self.agent_max_repair_attempts = _int("AGENT_MAX_REPAIR_ATTEMPTS", 2)
         self.agent_max_history_turns = _int("AGENT_MAX_HISTORY_TURNS", 8)
         self.agent_daily_token_limit = _int("AGENT_DAILY_TOKEN_LIMIT", 200000)
-        self.agent_fallback_rules = _bool("AGENT_FALLBACK_RULES", False)
+        self.agent_fallback_rules = _bool("AGENT_FALLBACK_RULES", True)
         frontend = os.getenv("FRONTEND_DIST")
         self.frontend_dist = Path(frontend) if frontend else BASE_DIR / "frontend" / "dist"
 

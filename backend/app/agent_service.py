@@ -84,7 +84,7 @@ def _fallback_plan(user: User, text: str, media: list[dict], target_duration: in
     return "one-line-video", {"title": text.strip()[:40], "target_duration": target, "nodes": nodes, "output_node": output, "reason": "按模型单段时长上限拆分并顺序拼接"}
 
 
-def create_plan(user: User, text: str, media: list[dict], surface: str, agent_model_id: str | None = None, target_duration: int | None = None) -> tuple[str, dict, AgentResult | None, str]:
+async def create_plan(user: User, text: str, media: list[dict], surface: str, agent_model_id: str | None = None, target_duration: int | None = None) -> tuple[str, dict, AgentResult | None, str]:
     configured = settings.agent_provider_configured
     if not configured:
         if not settings.agent_fallback_rules:
@@ -92,7 +92,7 @@ def create_plan(user: User, text: str, media: list[dict], surface: str, agent_mo
         skill, value = _fallback_plan(user, text, media, target_duration)
         return skill, value, None, "未配置 Agent Provider，使用兼容规划器"
     request = {"surface": surface, "user_input": text, "target_duration": target_duration, "reference_media": media}
-    result = provider_plan(
+    result = await provider_plan(
         agent_model_id,
         AGENT_SYSTEM_PROMPT,
         json.dumps(request, ensure_ascii=False),

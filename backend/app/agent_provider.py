@@ -23,11 +23,19 @@ class AgentResult:
 
 
 def _chat_completions_url(base_url: str) -> str:
-    """Accept either an OpenAI base URL or the full chat endpoint."""
+    """Construct the chat completions endpoint from a base URL.
+
+    Handles three forms:
+    - Full endpoint: https://host/v1/chat/completions
+    - OpenAI-compatible base: https://host/v1 or https://host/compatible-mode/v1
+    - Bare host: https://dashscope.aliyuncs.com (needs /compatible-mode/v1 prefix)
+    """
     url = base_url.rstrip("/")
     if url.endswith("/chat/completions"):
         return url
-    return url + "/chat/completions"
+    if url.endswith("/compatible-mode/v1") or url.endswith("/v1"):
+        return url + "/chat/completions"
+    return url + "/compatible-mode/v1/chat/completions"
 
 
 def public_models() -> list[dict[str, Any]]:
@@ -76,7 +84,7 @@ def _parse_json(content: str) -> dict[str, Any]:
     return value
 
 
-def plan(model_id: str | None, system_prompt: str, user_prompt: str) -> AgentResult:
+async def plan(model_id: str | None, system_prompt: str, user_prompt: str) -> AgentResult:
     model = resolve_model(model_id)
     headers = {"Authorization": f"Bearer {model.api_key}", "Content-Type": "application/json"}
     body: dict[str, Any] = {
@@ -87,18 +95,16 @@ def plan(model_id: str | None, system_prompt: str, user_prompt: str) -> AgentRes
     }
     if model.supports_json:
         body["response_format"] = {"type": "json_object"}
+    url = _chat_completions_url(model.base_url)
+    timeout = httpx.Timeout(settings.agent_timeout_seconds, connect=10.0)
     try:
-        with httpx.Client(timeout=settings.agent_timeout_seconds) as client:
-            response = client.post(
-                _chat_completions_url(model.base_url),
-                headers=headers,
-                json=body,
-            )
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, headers=headers, json=body)
             response.raise_for_status()
             data = response.json()
     except httpx.ConnectTimeout:
-        logger.warning("Agent 连接超时：model=%s", model.id)
-        raise AgentError("Agent 连接 SiliconFlow 超时，请检查服务器网络或接口地址") from None
+        logger.warning("Agent 连接超时：model=%s url=%s", model.id, url)
+        raise AgentError(f"Agent 连接 {model.base_url} 超时，请检查服务器网络或接口地址") from None
     except httpx.ReadTimeout:
         logger.warning("Agent 读取响应超时：model=%s timeout=%ss", model.id, settings.agent_timeout_seconds)
         raise AgentError(
