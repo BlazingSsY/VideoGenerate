@@ -28,3 +28,7 @@ artifacts/
 *.7z
 *.gz
 *.rar
+
+# macOS AppleDouble（外接盘/非原生文件系统会生成）
+._*
+.DS_Store
