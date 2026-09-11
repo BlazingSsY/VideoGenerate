@@ -1,0 +1,33 @@
+# Caddy 反向代理 —— 推荐方案，自动申请并续期 Let's Encrypt 证书
+#
+# 用法：
+#   1. 域名 A 记录解析到本机公网 IP
+#   2. .env 里填 APP_DOMAIN=你的域名，BEHIND_PROXY=true
+#   3. docker compose --profile caddy up -d
+#
+# 证书签发要求 80 和 443 都能从公网访问，服务器安全组记得放行。
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	# 上传参考图和下载视频都可能比较大，放宽限制
+	request_body {
+		max_size 64MB
+	}
+
+	reverse_proxy video-generate:{$PORT:8008} {
+		# 让后端能拿到真实客户端 IP 与协议（限流、HTTPS 判断要用）
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+
+		# 视频生成要轮询、下载要转发大文件，超时给足
+		transport http {
+			read_timeout 30m
+			write_timeout 30m
+		}
+	}
+
+	log {
+		output file /var/log/caddy/access.log
+	}
+}

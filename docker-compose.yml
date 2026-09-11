@@ -1,0 +1,54 @@
+services:
+  video-generate:
+    build: .
+    image: video-generate:latest
+    container_name: video-generate
+    restart: unless-stopped
+    ports:
+      # 宿主机端口:容器端口，撞端口时改左边这个数字即可。
+      # 用 Caddy 时可以改成 "127.0.0.1:${PORT:-8008}:${PORT:-8008}" 只监听本机，
+      # 让应用不直接暴露在公网上。
+      - "${PORT:-8008}:${PORT:-8008}"
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /app/data
+      PORT: ${PORT:-8008}
+    volumes:
+      # 数据库、上传的参考图、生成的视频都保存在宿主机上，容器重建不丢
+      - ./data:/app/data
+    networks:
+      - video-net
+
+  # 反向代理 + 自动 HTTPS（可选）
+  # 启用：docker compose --profile caddy up -d
+  # 前置条件：.env 里填好 APP_DOMAIN，域名已解析到本机，80/443 已放行
+  caddy:
+    image: caddy:2-alpine
+    container_name: video-generate-caddy
+    restart: unless-stopped
+    profiles: ["caddy"]
+    depends_on:
+      - video-generate
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      # 未填时退回 localhost，Caddy 会签一张本地自签证书，方便先跑通链路
+      APP_DOMAIN: ${APP_DOMAIN:-localhost}
+      PORT: ${PORT:-8008}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data        # 证书，务必持久化，否则重建容器会重复申请触发限流
+      - caddy-config:/config
+      - ./data/caddy-logs:/var/log/caddy
+    networks:
+      - video-net
+
+networks:
+  video-net:
+
+volumes:
+  caddy-data:
+  caddy-config:

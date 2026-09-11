@@ -1,0 +1,14 @@
+.git
+.venv
+data
+node_modules
+frontend/node_modules
+dist
+frontend/dist
+artifacts
+release
+__pycache__
+*.pyc
+*.mp4
+.env
+.vscode

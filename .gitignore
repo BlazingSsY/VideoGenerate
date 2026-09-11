@@ -1,0 +1,11 @@
+.env
+.venv/
+data/
+node_modules/
+dist/
+frontend/dist/
+__pycache__/
+*.pyc
+*.mp4
+release/
+artifacts/
