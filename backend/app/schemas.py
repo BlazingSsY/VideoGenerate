@@ -211,6 +211,10 @@ class AgentTurnOut(BaseModel):
     run_id: Optional[str] = None
 
 
+class CanvasRunRequest(BaseModel):
+    revision: int = Field(ge=0)
+
+
 class CanvasCreate(BaseModel):
     title: Optional[str] = Field(default=None, max_length=120)
 

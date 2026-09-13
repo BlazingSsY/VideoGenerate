@@ -4,15 +4,16 @@ import { BrowserRouter } from 'react-router-dom'
 
 import App from './App'
 import { AuthProvider } from './auth'
+import { ThemeProvider } from './theme'
 import '@xyflow/react/dist/style.css'
 import './styles.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <BrowserRouter>
-      <AuthProvider>
+      <ThemeProvider><AuthProvider>
         <App />
-      </AuthProvider>
+      </AuthProvider></ThemeProvider>
     </BrowserRouter>
   </React.StrictMode>,
 )

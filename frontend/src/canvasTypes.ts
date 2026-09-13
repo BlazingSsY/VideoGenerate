@@ -3,7 +3,7 @@ import type { Edge, Node, Viewport } from '@xyflow/react'
 import type { MediaKind, ModeId } from './types'
 
 export type CanvasNodeType = 'prompt' | 'image' | 'video' | 'audio' | 'generate' | 'output'
-export type CanvasNodeStatus = '' | 'idle' | 'pending' | 'running' | 'succeeded' | 'failed'
+export type CanvasNodeStatus = '' | 'idle' | 'queued' | 'pending' | 'running' | 'succeeded' | 'failed' | 'blocked' | 'canceled'
 
 export interface PromptNodeData extends Record<string, unknown> {
   text: string
@@ -38,6 +38,7 @@ export interface GenerateNodeData extends Record<string, unknown> {
   audio: boolean
   inlinePrompt: string
   media_slots?: Partial<Record<MediaKind, string[]>>
+  reference_bindings?: { edge_id: string; alias: string; description: string }[]
 }
 
 export type CanvasNodeData =

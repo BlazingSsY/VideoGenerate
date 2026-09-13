@@ -1,12 +1,13 @@
 import { lazy, Suspense, useState, useRef } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { Video, LogOut, KeyRound, Users as UsersIcon, Sparkles, ChevronDown } from 'lucide-react'
+import { Video, LogOut, KeyRound, Users as UsersIcon, Sparkles, ChevronDown, Sun, Moon } from 'lucide-react'
 import api, { errorText } from './api'
 import { useAuth } from './auth'
 import Login from './pages/Login'
 import AgentDrawer from './components/agent/AgentDrawer'
 import { CanvasAgentBridgeContext, type CanvasAgentBinding } from './canvasAgentBridge'
 import { cn } from './lib/utils'
+import { useTheme } from './theme'
 
 const Canvas = lazy(() => import('./pages/Canvas'))
 const Users = lazy(() => import('./pages/Users'))
@@ -14,6 +15,7 @@ const Skills = lazy(() => import('./pages/Skills'))
 
 function Shell({ children }: { children: React.ReactNode }) {
   const { user, config, logout } = useAuth()
+  const theme = useTheme()
   const navigate = useNavigate()
   const location = useLocation()
   const [pwdOpen, setPwdOpen] = useState(false)
@@ -67,8 +69,15 @@ function Shell({ children }: { children: React.ReactNode }) {
           </>)}
         </nav>
 
-        <div className="relative">
-          <button onClick={() => setMenuOpen(!menuOpen)} className="flex items-center gap-1.5 px-2 py-1 text-xs rounded-md hover:bg-[var(--color-surface-3)] transition-colors">
+        <div className="relative flex items-center gap-2">
+          <button type="button" role="switch" aria-checked={theme.light} aria-label="浅色主题"
+            title={theme.light ? '切换到深色' : '切换到浅色'} data-testid="theme-toggle"
+            onClick={theme.toggle} className="theme-switch">
+            <span className="theme-switch-thumb" />
+            <Moon className="theme-switch-moon" aria-hidden="true" />
+            <Sun className="theme-switch-sun" aria-hidden="true" />
+          </button>
+          <button data-testid="account-menu-btn" onClick={() => setMenuOpen(!menuOpen)} className="flex items-center gap-1.5 px-2 py-1 text-xs rounded-md hover:bg-[var(--color-surface-3)] transition-colors">
             <div className="flex items-center justify-center w-6 h-6 rounded-full bg-brand-gradient text-white text-[10px] font-medium">
               {(user?.display_name || user?.username || '?')[0]}
             </div>

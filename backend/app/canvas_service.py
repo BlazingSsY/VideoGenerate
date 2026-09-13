@@ -165,6 +165,8 @@ def graph_input_hash(graph: dict[str, Any], node_id: str) -> str:
                 "model", "capability", "resolution", "ratio", "duration",
                 "watermark", "audio", "inlinePrompt", "media_slots",
             )}
+            if data.get("reference_bindings"):
+                value["reference_bindings"] = data["reference_bindings"]
         elif kind == "output":
             value = {
                 "items": [item.get("nodeKey") for item in data.get("items") or []],
@@ -242,8 +244,8 @@ def persist_canvas_graph(
             )
             # Result fields belong to the server. A layout save may have been
             # prepared before a result arrived; it must neither erase nor restore it.
-            result_fields = {key: (node.data or {})[key] for key in ("outputFile",) if node.type == item["type"] and key in (node.data or {})}
-            for key in ("outputFile", "outputVideoSrc"):
+            result_fields = {key: (node.data or {})[key] for key in ("outputFile", "outputError") if node.type == item["type"] and key in (node.data or {})}
+            for key in ("outputFile", "outputVideoSrc", "outputError"):
                 item["data"].pop(key, None)
             if changed_inputs:
                 node.status = "idle"

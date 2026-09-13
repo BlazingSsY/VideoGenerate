@@ -1,22 +1,29 @@
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from ..canvas_executor import compose_canvas_output, prepare_generation
+from ..agent_executor import spawn_run
+from ..agent_run_service import run_out
+from ..canvas_run_service import start_canvas_run
 from ..canvas_service import (
     CanvasServiceError,
     apply_agent_patch,
     canvas_snapshot,
+    graph_input_hash,
+    lock_canvas,
     persist_canvas_graph,
     undo_agent_operation,
 )
 from ..cleanup import delete_videos_for
 from ..database import get_db
 from ..media_links import format_video_src, sign_path
-from ..models import Canvas, CanvasNode, Conversation, Message, User
+from ..models import AgentRun, Canvas, CanvasNode, Conversation, Message, User
 from ..schemas import (
     CanvasCreate,
     CanvasAgentPatch,
@@ -24,6 +31,7 @@ from ..schemas import (
     CanvasGraphPut,
     CanvasOut,
     CanvasPatch,
+    CanvasRunRequest,
 )
 from ..security import current_user
 from ..tasks import spawn
@@ -239,6 +247,9 @@ def canvas_status(
     for node in canvas.nodes:
         message = db.get(Message, node.message_id) if node.message_id else None
         status = message.status if message is not None else node.status
+        output_error = str((node.data or {}).get("outputError") or "")
+        if output_error and node.status in {"failed", "blocked", "canceled"}:
+            status = node.status
         if message is None:
             output_file = str((node.data or {}).get("outputFile", ""))
             video_src = format_video_src(output_file) if output_file else ""
@@ -255,10 +266,37 @@ def canvas_status(
                 "message_id": node.message_id,
                 "video_src": video_src,
                 "video_expired": bool(message.video_expired) if message else False,
-                "error": message.error if message else "",
+                "error": output_error or (message.error if message else ""),
             }
         )
     return result
+
+
+@router.post("/{canvas_id}/run", status_code=202)
+def run_canvas(canvas_id: str, payload: CanvasRunRequest, request: Request,
+               db: Session = Depends(get_db), user: User = Depends(current_user)):
+    try:
+        run = start_canvas_run(db, _own(db, canvas_id, user), user, request, payload.revision)
+    except CanvasServiceError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    spawn_run(run.id)
+    return run_out(db, run)
+
+
+@router.get("/{canvas_id}/runs/latest")
+def latest_canvas_run(canvas_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    _own(db, canvas_id, user)
+    run = db.query(AgentRun).filter(AgentRun.canvas_id == canvas_id).order_by(AgentRun.created_at.desc()).first()
+    return run_out(db, run) if run else None
+
+
+def _lock_for_node_run(db: Session, canvas: Canvas, payload: CanvasRunRequest | None) -> None:
+    try:
+        lock_canvas(db, canvas, expected_revision=payload.revision if payload else None)
+    except CanvasServiceError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    if db.query(AgentRun).filter(AgentRun.canvas_id == canvas.id, AgentRun.status.in_(["queued", "running"])).first():
+        raise HTTPException(409, "画布正在运行，请等待本次完成后再单独运行节点")
 
 
 @router.post("/{canvas_id}/nodes/{node_id}/run", status_code=202)
@@ -266,10 +304,12 @@ def run_node(
     canvas_id: str,
     node_id: str,
     request: Request,
+    payload: CanvasRunRequest | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ):
     canvas = _own(db, canvas_id, user)
+    _lock_for_node_run(db, canvas, payload)
     node = next((item for item in canvas.nodes if item.id == node_id), None)
     if node is None:
         raise HTTPException(status_code=404, detail="节点不存在")
@@ -292,18 +332,46 @@ def run_node(
 async def compose_output(
     canvas_id: str,
     node_id: str,
+    payload: CanvasRunRequest | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ):
     """最终输出合成：按输出节点的 items 顺序 + transitions 转场拼接已生成片段。"""
     canvas = _own(db, canvas_id, user)
+    _lock_for_node_run(db, canvas, payload)
     node = next((item for item in canvas.nodes if item.id == node_id), None)
     if node is None or node.type != "output":
         raise HTTPException(status_code=404, detail="输出节点不存在")
+    if node.status in {"pending", "running"}:
+        raise HTTPException(409, "输出节点正在合成，请等待本次完成")
+    frozen_hash = graph_input_hash(canvas_snapshot(canvas), node.id)
+    token = uuid.uuid4().hex
+    frozen = SimpleNamespace(id=canvas.id,
+        nodes=[SimpleNamespace(id=n.id, type=n.type, message_id=n.message_id, data=deepcopy(n.data)) for n in canvas.nodes],
+        edges=[SimpleNamespace(source=e.source, target=e.target, target_handle=e.target_handle) for e in canvas.edges])
+    frozen_node = next(n for n in frozen.nodes if n.id == node.id)
+    node.status = "running"
+    node.input_hash = token
+    node.message_id = None
+    node.data = {k: v for k, v in (node.data or {}).items() if k not in {"outputFile", "outputVideoSrc", "outputError"}}
+    db.commit()
+    error = None
     try:
-        filename = await compose_canvas_output(canvas, node)
-    except HTTPException:
-        raise
+        filename = await compose_canvas_output(frozen, frozen_node)
+    except HTTPException as exc:
+        error = exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"合成失败：{exc}") from exc
+        error = HTTPException(status_code=500, detail=f"合成失败：{exc}")
+    canvas = db.get(Canvas, canvas_id)
+    if canvas:
+        lock_canvas(db, canvas)
+        node = next((n for n in canvas.nodes if n.id == node_id), None)
+        if node and node.input_hash == token and graph_input_hash(canvas_snapshot(canvas), node_id) == frozen_hash:
+            node.status = "failed" if error else "succeeded"
+            node.data = {**node.data, "outputError": str(error.detail) if error else ""}
+            if not error:
+                node.data = {**node.data, "outputFile": filename}
+        db.commit()
+    if error:
+        raise error
     return {"video_src": format_video_src(filename), "filename": filename}

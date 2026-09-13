@@ -16,7 +16,7 @@ from .catalog import get_model
 from .database import SessionLocal
 from .media_links import format_video_src
 from .models import AgentRun, AgentTask, AgentTurn, Canvas, CanvasNode, Conversation, Message, User
-from .tasks import run_generation
+from .tasks import _download_video, run_generation
 
 logger = logging.getLogger(__name__)
 _runs: set[str] = set()
@@ -102,6 +102,7 @@ def _set_task(run_id: str, node_id: str, **fields: Any) -> None:
                 )
             ):
                 canvas_node.status = task.status
+                canvas_node.data = {**(canvas_node.data or {}), "outputError": task.error or ""}
                 if task.message_id and task.task_type == "generate":
                     canvas_node.message_id = task.message_id
                 if task.status == "succeeded":
@@ -148,9 +149,16 @@ def _create_message(run_id: str, node: dict[str, Any]) -> str:
         user = db.get(User, run.user_id)
         if user is None:
             raise RuntimeError("Agent 运行用户不存在")
-        media = _validated_reference_media(
-            db, user, node.get("reference_media") or [], node.get("end_frame"),
-        )
+        references = deepcopy(node.get("reference_media") or [])
+        for item in references:
+            if not isinstance(item, dict) or not item.get("source_node"):
+                continue
+            source = db.query(AgentTask).filter_by(run_id=run_id, node_id=item.pop("source_node")).one()
+            upstream = db.get(Message, source.message_id) if source.message_id else None
+            if source.status != "succeeded" or not upstream or not upstream.video_url:
+                raise RuntimeError("上游生成节点没有可供参考的在线视频地址")
+            item["url"] = upstream.video_url
+        media = _validated_reference_media(db, user, references, node.get("end_frame"))
         model_spec = get_model(str(node.get("model", "")))
         message = Message(
             conversation_id=conversation.id,
@@ -197,6 +205,11 @@ def _task_output(run_id: str, node_id: str) -> Path:
 
 
 async def _compose(run_id: str, node: dict[str, Any]) -> str:
+    if "transitions" in node:
+        from .canvas_executor import compose_video_clips
+        transitions = {item["after"]: item["type"] for item in node["transitions"]}
+        clips = [(_task_output(run_id, key).name, transitions.get(key, "none")) for key in node["inputs"]]
+        return await compose_video_clips(clips, run_id)
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("服务器未安装 FFmpeg，无法执行视频拼接")
@@ -264,12 +277,25 @@ async def _execute_task(run_id: str, node_id: str, turn_id: str) -> bool:
                 message_id = current.message_id
             if not message_id:
                 message_id = _create_message(run_id, node)
-            await run_generation(message_id)
+            _set_task(run_id, node_id, message_id=message_id)
+            with SessionLocal() as db:
+                already_succeeded = db.get(Message, message_id).status == "succeeded"
+            if not already_succeeded:
+                await run_generation(message_id)
             with SessionLocal() as db:
                 message = db.get(Message, message_id)
                 if message is None or message.status != "succeeded":
                     raise RuntimeError(message.error if message else "视频生成任务丢失")
                 output = message.local_video
+                video_url = message.video_url
+            if already_succeeded and (not output or not (settings.video_dir / output).is_file()):
+                # Reusing an online result needs only a local copy for composition;
+                # never submit a new generation because its download is missing.
+                output = await _download_video(video_url, message_id) if video_url else ''
+                if output:
+                    with SessionLocal() as db:
+                        db.get(Message, message_id).local_video = output
+                        db.commit()
             if not output:
                 raise RuntimeError("上游只返回了临时地址，缺少本地视频，无法保证后续拼接")
             _set_task(run_id, node_id, status="succeeded", output_file=output, message_id=message_id, error="")
@@ -360,9 +386,14 @@ async def execute_run(run_id: str) -> None:
                 _push_turn_task_event(turn_id, "__run__", "canceled", error="已停止后续任务", run_id=run_id)
                 return
             if failed is not None:
-                _block_remaining(run_id, failed.node_id)
-                _set_run(run_id, status="failed", error=f"{failed.node_id}：{failed.error}")
-                return
+                for task in tasks:
+                    if task.status == "failed":
+                        _block_remaining(run_id, task.node_id)
+                # Other independent branches can still finish; only dependent
+                # outputs are blocked, so a failed shot doesn't strand the canvas.
+                if not ready_ids:
+                    _set_run(run_id, status="failed", error=f"{failed.node_id}：{failed.error}")
+                    return
             if all_succeeded:
                 break
             if not ready_ids:

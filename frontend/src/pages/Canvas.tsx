@@ -10,9 +10,10 @@ import {
   Plus, MoreHorizontal, Trash2, X,
   PanelLeftClose, PanelLeftOpen,
   Library, Wand2, Star, Folder,
-  Sun, Moon, Save, Undo2,
+  Save, Undo2, Play, Loader2,
 } from 'lucide-react'
-import api from '../api'
+import api, { type AgentRunSnapshot } from '../api'
+import { serializeCanvasNodes } from '../canvasOutput'
 import { useAuth } from '../auth'
 import { cn } from '../lib/utils'
 import type {
@@ -30,6 +31,7 @@ import FlowEdge from '../components/nodes/FlowEdge'
 import { isAggregateTargetHandle, isValidCanvasConnection, sanitizeLoadedEdges } from '../canvasRules'
 import type { VideoModel } from '../types'
 import { useCanvasAgentBridge } from '../canvasAgentBridge'
+import { useTheme } from '../theme'
 
 const nodeTypes = {
   prompt: PromptNode, image: ImageNode,
@@ -38,25 +40,13 @@ const nodeTypes = {
 }
 const edgeTypes = { flow: FlowEdge }
 
-/** 画布主题：dark / light。挂 html.theme-light class，styles.css 的浅色变量组接管。 */
-function useTheme() {
-  const [light, setLight] = useState<boolean>(() => {
-    try { return localStorage.getItem('vg-theme') === 'light' } catch { return false }
-  })
-  useEffect(() => {
-    document.documentElement.classList.toggle('theme-light', light)
-    try { localStorage.setItem('vg-theme', light ? 'light' : 'dark') } catch {}
-  }, [light])
-  return { light, toggle: () => setLight(v => !v) }
-}
-
 /** 侧栏小项 — unused helper removed; loadCanvas uses sanitizeLoadedEdges */
 
 const DEFAULT_MODEL_ID = 'wan3.0-video-prime'
 
 function draftSnapshot(nodes: CanvasFlowNode[], edges: CanvasFlowEdge[], viewport: Viewport) {
   return JSON.stringify({
-    nodes: nodes.map(n => ({ id: n.id, type: n.type, position: n.position, data: n.data, status: '', message_id: null })),
+    nodes: serializeCanvasNodes(nodes, edges),
     edges: edges.map(e => ({ id: e.id, source: e.source, source_handle: e.sourceHandle, target: e.target, target_handle: e.targetHandle })),
     viewport,
   })
@@ -89,9 +79,25 @@ function CanvasInner() {
   const [saving, setSaving] = useState(false)
   const [title, setTitle] = useState('')
   const [statusMap, setStatusMap] = useState<Record<string, { status: string; message_id: string | null; video_src?: string; error?: string }>>({})
+  const [canvasRun, setCanvasRun] = useState<AgentRunSnapshot | null>(null)
+  const [startingRun, setStartingRun] = useState(false)
+  const [runError, setRunError] = useState('')
+  const startingRunRef = useRef(false)
+  const saveInFlightRef = useRef<Promise<void> | null>(null)
   const [booting, setBooting] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [nodeMenuOpen, setNodeMenuOpen] = useState(false)
+  const nodeMenuRef = useRef<HTMLDivElement>(null)
+  const nodeMenuTimer = useRef<ReturnType<typeof setTimeout>>()
+  useEffect(() => {
+    if (!nodeMenuOpen) return
+    const close = (event: PointerEvent) => {
+      if (!nodeMenuRef.current?.contains(event.target as globalThis.Node)) setNodeMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', close)
+    return () => document.removeEventListener('pointerdown', close)
+  }, [nodeMenuOpen])
+  useEffect(() => () => clearTimeout(nodeMenuTimer.current), [])
   const [libraryOpen, setLibraryOpen] = useState(false)
   const theme = useTheme()
   const [models, setModels] = useState<VideoModel[]>([])
@@ -122,8 +128,12 @@ function CanvasInner() {
     if (!canvasId) return
     const sequence = ++statusSequenceRef.current
     try {
-      const res = await api.get(`/api/canvases/${canvasId}/status`)
+      const [res, runResponse] = await Promise.all([
+        api.get(`/api/canvases/${canvasId}/status`),
+        api.get(`/api/canvases/${canvasId}/runs/latest`).catch(() => undefined),
+      ])
       if (activeIdRef.current !== canvasId || sequence !== statusSequenceRef.current) return
+      if (runResponse) setCanvasRun(runResponse.data?.id ? runResponse.data : null)
       setStatusMap(prev => {
         const next = { ...prev }
         for (const row of res.data as Array<{ node_id: string; status: string; message_id: string | null; video_src?: string; video_expired?: boolean; error?: string }>) {
@@ -141,14 +151,15 @@ function CanvasInner() {
 
   const runningRef = useRef(false)
   useEffect(() => {
-    runningRef.current = Object.values(statusMap).some(s => s.status === 'pending' || s.status === 'running')
-  }, [statusMap])
+    runningRef.current = ['queued', 'running'].includes(canvasRun?.status || '')
+      || Object.values(statusMap).some(s => ['queued', 'pending', 'running'].includes(s.status))
+  }, [statusMap, canvasRun])
 
   useEffect(() => {
     if (!activeId || !runningRef.current) return
     const timer = setInterval(() => refreshStatus(activeId), 2000)
     return () => clearInterval(timer)
-  }, [activeId, statusMap, refreshStatus])
+  }, [activeId, statusMap, canvasRun, refreshStatus])
 
   const loadCanvases = useCallback(async () => {
     const res = await api.get('/api/canvases')
@@ -189,6 +200,8 @@ function CanvasInner() {
     setNodes(flowNodes)
     setEdges(flowEdges)
     setStatusMap({})
+    setCanvasRun(null)
+    setRunError('')
     setSaveError(null)
     // 重载后 lastSaved 需匹配 save() 的快照形状，否则首帧必然触发一次空保存
     d.nodes.forEach(n => {
@@ -209,12 +222,12 @@ function CanvasInner() {
     })()
   }, [loadCanvases, loadCanvas])
 
-  const save = useCallback(async () => {
+  const performSave = useCallback(async () => {
     clearTimeout(saveTimerRef.current)
     if (!activeId || activeIdRef.current !== activeId) return
     const curNodes = nodesRef.current
     const curEdges = edgesRef.current
-    const serNodes = curNodes.map((n: any) => ({ id: n.id, type: n.type!, position: n.position, data: n.data, status: '', message_id: null }))
+    const serNodes = serializeCanvasNodes(curNodes, curEdges)
     const serEdges = curEdges.map((e: any) => ({ id: e.id, source: e.source, source_handle: e.sourceHandle!, target: e.target, target_handle: e.targetHandle! }))
     const payload = { updated_at: updatedAtRef.current, revision: revisionRef.current, viewport: viewportRef.current, nodes: serNodes, edges: serEdges }
     const snap = JSON.stringify({ nodes: serNodes, edges: serEdges, viewport: viewportRef.current })
@@ -242,6 +255,16 @@ function CanvasInner() {
       throw err
     } finally { setSaving(false) }
   }, [activeId, refreshStatus])
+
+  // A run waits for any autosave already in flight, then saves the newest draft.
+  const save = useCallback(async () => {
+    while (saveInFlightRef.current) await saveInFlightRef.current
+    const pending = performSave()
+    saveInFlightRef.current = pending
+    try { await pending } finally {
+      if (saveInFlightRef.current === pending) saveInFlightRef.current = null
+    }
+  }, [performSave])
 
   const debouncedSave = useCallback(() => {
     clearTimeout(saveTimerRef.current)
@@ -312,11 +335,12 @@ function CanvasInner() {
 
   const onConnect = useCallback((c: Connection) => {
     if (!isValidCanvasConnection(c, nodes, modelsRef.current)) return
-    // 聚合槽（r2v 参考图片/视频/音频）允许多条边共点；prompt 与单槽类（首帧/尾帧）仍一对一
+    // 输出拼接入口与 r2v 聚合素材槽允许多条边共点；prompt、首帧和尾帧仍一对一。
     const target = nodes.find(n => n.id === c.target)
-    const multiOk = target?.type === 'generate'
+    const multiOk = (target?.type === 'output' && c.targetHandle === 'input')
+      || (target?.type === 'generate'
       && c.targetHandle !== 'prompt'
-      && isAggregateTargetHandle(c.targetHandle!, target, modelsRef.current)
+      && isAggregateTargetHandle(c.targetHandle!, target, modelsRef.current))
     const dup = edges.some(e =>
       e.source === c.source && e.sourceHandle === c.sourceHandle
       && e.target === c.target && e.targetHandle === c.targetHandle)
@@ -393,6 +417,71 @@ function CanvasInner() {
       revisionRef.current = d.revision
     }
   }
+
+  const prepareRun = useCallback(async () => {
+    const id = activeId
+    if (!id) throw new Error('请先选择画布')
+    await save()
+    if (activeIdRef.current !== id) throw new Error('已切换画布，请在当前画布重新运行')
+    if (draftSnapshot(nodesRef.current, edgesRef.current, viewportRef.current) !== lastSaved.current) {
+      throw new Error('保存期间输入发生了变化，请重新点击运行')
+    }
+    return { id, revision: revisionRef.current }
+  }, [activeId, save])
+
+  const runNode = useCallback(async (nodeId: string) => {
+    const { id, revision } = await prepareRun()
+    await api.post(`/api/canvases/${id}/nodes/${nodeId}/run`, { revision })
+    await refreshStatus(id)
+  }, [prepareRun, refreshStatus])
+
+  const composeOutput = useCallback(async (nodeId: string) => {
+    const { id, revision } = await prepareRun()
+    try { await api.post(`/api/canvases/${id}/output/${nodeId}/compose`, { revision }) }
+    finally { await refreshStatus(id) }
+  }, [prepareRun, refreshStatus])
+
+  const runCanvas = async () => {
+    if (!activeId || startingRunRef.current) return
+    startingRunRef.current = true
+    setStartingRun(true)
+    setRunError('')
+    const id = activeId
+    try {
+      const generators = nodesRef.current.filter(node => node.type === 'generate')
+      if (!generators.length) throw new Error('请先添加生成节点')
+      if (!nodesRef.current.some(node => node.type === 'output')) {
+        pushUndo()
+        const outputId = nanoid(8)
+        const ordered = [...generators].sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
+        const nextNodes: CanvasFlowNode[] = [...nodesRef.current, {
+          id: outputId, type: 'output',
+          position: { x: Math.max(...generators.map(node => node.position.x)) + 400, y: ordered[0].position.y },
+          data: { label: '最终输出', items: ordered.map(node => ({ nodeKey: node.id })) },
+        }]
+        const nextEdges = [...edgesRef.current, ...ordered.map(node => ({
+          id: nanoid(), source: node.id, sourceHandle: 'output', target: outputId, targetHandle: 'input',
+        }))]
+        nodesRef.current = nextNodes
+        edgesRef.current = nextEdges
+        setNodes(nextNodes)
+        setEdges(nextEdges)
+      }
+      const prepared = await prepareRun()
+      const res = await api.post(`/api/canvases/${prepared.id}/run`, { revision: prepared.revision })
+      if (activeIdRef.current === id) setCanvasRun(res.data)
+      await refreshStatus(id)
+    } catch (error: any) {
+      if (activeIdRef.current === id) setRunError(String(error?.response?.data?.detail || error?.message || '运行失败'))
+    } finally {
+      startingRunRef.current = false
+      setStartingRun(false)
+    }
+  }
+
+  const canvasRunning = startingRun || ['queued', 'running'].includes(canvasRun?.status || '')
+  const completedTasks = canvasRun?.tasks.filter(task => task.status === 'succeeded').length || 0
+  const busyNodes = Object.values(statusMap).some(status => ['queued', 'pending', 'running'].includes(status.status))
 
   useEffect(() => {
     if (!activeId) {
@@ -473,14 +562,18 @@ function CanvasInner() {
 
       {/* Main canvas area */}
       <div className="relative flex-1 min-h-0 bg-[var(--color-canvas-bg)]">
-        {/* 左上角：保存画布 + 回撤 */}
+        <div className="absolute right-3 top-3 z-20 flex flex-col items-end gap-2 max-w-[min(420px,70%)]">
+          {canvasRun?.status === 'succeeded' && <span className="rounded-lg px-2 py-1 bg-[var(--color-surface-1)] text-[11px] text-[var(--color-success)]">全部完成，可在节点中观看视频</span>}
+          {(runError || canvasRun?.error) && <p role="alert" className="rounded-lg px-3 py-2 bg-[var(--color-surface-1)] text-[11px] text-[var(--color-danger)]">{runError || canvasRun?.error}</p>}
+        </div>
+        {/* 左上角：保存画布 + 回撤 + 运行 */}
         {saveError && (
           <div className="absolute left-3 top-16 z-30 flex items-center gap-2 px-3 py-1.5 bg-red-950/80 backdrop-blur-sm border border-red-500/30 rounded-xl shadow-lg text-[11px] text-red-200 animate-fade-in" data-testid="save-error">
             {saveError}
             <button onClick={() => setSaveError(null)} aria-label="关闭提示" className="text-red-300 hover:text-red-100 shrink-0"><X className="w-3 h-3" /></button>
           </div>
         )}
-        <div className="absolute left-3 top-3 z-20 flex items-center gap-1 p-1.5 bg-[var(--color-surface-1)]/95 backdrop-blur-sm border border-[var(--color-border)] rounded-2xl shadow-lg">
+        <div data-testid="canvas-action-toolbar" className="canvas-toolbar absolute left-3 top-3 z-20 flex items-center gap-1 p-1.5 bg-[var(--color-surface-1)]/95 backdrop-blur-sm border border-[var(--color-border)] rounded-2xl shadow-lg">
           <div className="relative tool-tip-wrap">
             <button
               onClick={saveNow}
@@ -514,18 +607,30 @@ function CanvasInner() {
               回撤{undoDepth > 0 ? `（${undoDepth}）` : ''}
             </div>
           </div>
+          <div className="w-px h-5 mx-1 bg-[var(--color-border)]" />
+          <button onClick={runCanvas} data-testid="run-canvas-btn"
+            disabled={!activeId || canvasRunning || busyNodes || !nodes.some(node => node.type === 'generate')}
+            title="保存画布，复用未修改的已完成镜头，生成新增或修改的镜头，再自动拼接"
+            className="flex items-center gap-2 h-9 rounded-xl px-3 bg-brand-gradient text-white text-xs font-medium disabled:opacity-60">
+            {canvasRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+            {startingRun ? '准备运行…' : canvasRunning ? `运行中 ${completedTasks}/${canvasRun?.tasks.length || 0}` : '一键运行画布'}
+          </button>
         </div>
         {/* Vertical tool rail — left center overlay on canvas */}
-        <div className="absolute left-3 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-1 p-1.5 bg-[var(--color-surface-1)]/95 backdrop-blur-sm border border-[var(--color-border)] rounded-2xl shadow-lg">
+        <div data-testid="canvas-node-toolbar" className="canvas-toolbar absolute left-3 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-1 p-1.5 bg-[var(--color-surface-1)]/95 backdrop-blur-sm border border-[var(--color-border)] rounded-2xl shadow-lg">
           {/* Add node button with popover */}
-          <div className="relative">
+          <div className="relative" ref={nodeMenuRef}
+            onPointerEnter={event => { clearTimeout(nodeMenuTimer.current); if (event.pointerType === 'mouse') setNodeMenuOpen(true) }}
+            onPointerLeave={() => { nodeMenuTimer.current = setTimeout(() => setNodeMenuOpen(false), 250) }}
+            onKeyDown={event => { if (event.key === 'Escape') setNodeMenuOpen(false) }}>
             <div className="relative tool-tip-wrap">
               <button
-                onClick={() => setNodeMenuOpen(!nodeMenuOpen)}
+                onClick={() => setNodeMenuOpen(true)}
                 data-testid="add-node-btn"
+                aria-label="添加节点" aria-expanded={nodeMenuOpen} aria-controls="add-node-menu"
                 className={cn(
                   'flex items-center justify-center w-9 h-9 rounded-xl transition-all',
-                  nodeMenuOpen ? 'bg-[var(--color-accent-light)] text-[var(--color-accent)]' : 'hover:bg-[var(--color-surface-3)] text-[var(--color-ink-secondary)]'
+                  nodeMenuOpen ? 'bg-[var(--color-accent-light)] text-[var(--color-accent)]' : 'hover:bg-[var(--color-surface-3)] hover:text-[var(--color-primary)] text-[var(--color-ink-secondary)]'
                 )}
               >
                 <Plus className="w-4 h-4" />
@@ -536,8 +641,7 @@ function CanvasInner() {
             </div>
             {nodeMenuOpen && (
               <>
-                <div className="fixed inset-0 z-30" onClick={() => setNodeMenuOpen(false)} />
-                <div className="absolute left-full ml-2 top-0 z-40 w-36 bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-xl shadow-xl py-1 animate-fade-in">
+                <div id="add-node-menu" data-testid="add-node-menu" className="absolute left-full ml-2 top-0 z-40 w-44 bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-xl shadow-xl py-1 animate-fade-in">
                   <p className="px-3 py-1 text-[9px] font-medium text-[var(--color-ink-tertiary)] uppercase tracking-wider">节点类型</p>
                   {NODE_TOOLS.map(t => (
                     <button key={t.type} data-testid={`node-tool-${t.type}`} onClick={() => { addNode(t.type); setNodeMenuOpen(false) }} className="flex items-center gap-2 w-full px-3 py-2 text-xs text-[var(--color-ink-secondary)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-ink)] rounded-lg transition-colors">
@@ -550,20 +654,6 @@ function CanvasInner() {
           </div>
           {/* Divider */}
           <div className="w-5 h-px bg-[var(--color-border)] my-0.5" />
-          {/* Theme toggle */}
-          <div className="relative tool-tip-wrap">
-            <button
-              onClick={theme.toggle}
-              data-testid="theme-toggle"
-              aria-label="切换浅色/深色主题"
-              className="flex items-center justify-center w-9 h-9 rounded-xl text-[var(--color-ink-secondary)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-primary)] transition-colors"
-            >
-              {theme.light ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-            </button>
-            <div className="tool-tip absolute left-full ml-2 top-1/2 -translate-y-1/2 whitespace-nowrap px-2 py-1 bg-[var(--color-popover)] border border-[var(--color-border)] rounded-md text-[10px] text-[var(--color-ink-secondary)] z-50">
-              {theme.light ? '切换到深色' : '切换到浅色'}
-            </div>
-          </div>
           {/* Extra tools */}
           {EXTRA_TOOLS.map(t => (
             <div key={t.id} className="relative tool-tip-wrap">
@@ -591,6 +681,9 @@ function CanvasInner() {
           models,
           activeCanvasId: activeId,
           statusMap,
+          canvasRunning,
+          runNode,
+          composeOutput,
           refresh: () => activeId && refreshStatus(activeId),
         }}>
             <ReactFlow

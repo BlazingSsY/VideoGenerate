@@ -103,6 +103,24 @@ html.theme-light body {
 .bg-brand-logo { background: linear-gradient(140deg, #3768fd, #7c3aed 55%, #af28cf); }
 .bg-chat-gradient { background: linear-gradient(125deg, #3958d2, #713dc1); }
 
+.theme-switch { position: relative; width: 60px; height: 30px; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-surface-3); cursor: pointer; flex-shrink: 0; }
+.theme-switch-thumb { position: absolute; left: 3px; top: 3px; width: 22px; height: 22px; border-radius: 50%; background: #414159; box-shadow: 0 1px 4px #0002; transition: transform 220ms ease, background 220ms ease; }
+.theme-switch[aria-checked="true"] .theme-switch-thumb { transform: translateX(30px); background: #fff; }
+.theme-switch svg { position: absolute; top: 7px; width: 14px; height: 14px; transition: color 220ms ease; }
+.theme-switch-moon { left: 7px; color: #e5defa; }
+.theme-switch-sun { right: 7px; color: var(--color-ink-tertiary); }
+.theme-switch[aria-checked="true"] .theme-switch-sun { color: #bd7a17; }
+.theme-switch[aria-checked="true"] .theme-switch-moon { color: #8b91a1; }
+.theme-switch:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 3px; }
+
+/* Three continuous gradient layers, with softer tints against the light canvas. */
+html.theme-light .canvas-edge-line { stroke-width: 2; stroke-linecap: round; opacity: .9; }
+html.theme-light .canvas-edge-glow { stroke-width: 4; stroke-linecap: round; opacity: .28; filter: blur(3px); pointer-events: none; }
+html.theme-light .canvas-edge-halo { stroke-width: 8; stroke-linecap: round; opacity: .16; filter: blur(6px); pointer-events: none; }
+html.theme-light .canvas-edge[data-running="true"] .canvas-edge-glow { stroke-width: 5; opacity: .38; }
+html.theme-light .canvas-edge[data-running="true"] .canvas-edge-halo { stroke-width: 10; opacity: .22; }
+html.theme-light .canvas-edge[data-selected="true"] .canvas-edge-line { stroke-width: 2.5; opacity: 1; }
+
 /* 智能体初始页：留白、左对齐问候和成对的推荐卡片。 */
 .agent-welcome {
   display: flex;
@@ -291,6 +309,15 @@ html.theme-light body {
 /* Tool rail tooltip */
 .tool-tip { opacity: 0; pointer-events: none; transition: opacity 0.15s; }
 .tool-tip-wrap:hover .tool-tip { opacity: 1; }
+.canvas-toolbar button, .canvas-toolbar .tool-tip { transition: none; }
+.output-drag-preview {
+  position: fixed; z-index: 1000; pointer-events: none; opacity: .72;
+}
+.output-drag-card {
+  box-sizing: border-box; border-color: var(--color-primary);
+  background: var(--color-surface-2); color: var(--color-ink);
+  box-shadow: 0 6px 18px rgb(0 0 0 / .18);
+}
 
 /* Agent card hover */
 .card-hover-l { transition: transform 0.2s ease-out; }

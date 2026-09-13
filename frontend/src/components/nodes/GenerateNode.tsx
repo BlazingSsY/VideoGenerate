@@ -4,7 +4,8 @@ import { Zap, Play, Loader2, Check, X, PenLine } from 'lucide-react'
 import { CanvasNodeContext, useUpdateNodeData } from './context'
 import NodeSelect from './NodeSelect'
 import NodeShell from './NodeShell'
-import api from '../../api'
+import NodeVideo from './NodeVideo'
+import ReferenceSettings from './ReferenceSettings'
 import type { GenerateNodeData } from '../../canvasTypes'
 import { generateMediaSlots } from '../../canvasRules'
 import type { MediaKind, VideoModel } from '../../types'
@@ -41,6 +42,7 @@ const GenerateNode = memo(function GenerateNode({ id, data }: NodeProps) {
   const storeApi = useStoreApi()
   const setData = useUpdateNodeData(id, data)
   const [running, setRunning] = useState(false)
+  const [runError, setRunError] = useState('')
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
 
@@ -140,15 +142,18 @@ const GenerateNode = memo(function GenerateNode({ id, data }: NodeProps) {
   }
 
   const run = async () => {
-    if (!ctx?.activeCanvasId) return
+    if (!ctx?.runNode || running) return
     setRunning(true)
+    setRunError('')
     try {
-      await api.post(`/api/canvases/${ctx.activeCanvasId}/run`, { node_id: id })
-      ctx?.refresh?.()
-    } catch {} finally { setRunning(false) }
+      await ctx.runNode(id)
+    } catch (error: any) {
+      setRunError(String(error?.response?.data?.detail || error?.message || '运行失败'))
+    } finally { setRunning(false) }
   }
 
   const status = ctx?.statusMap?.[id]
+  const nodeBusy = ['queued', 'pending', 'running'].includes(status?.status || '')
   const ratioOpts = model?.ratio_options?.[d.capability as 't2v' | 'i2v' | 'r2v']?.options
   const ratioList = ratioOpts && ratioOpts.length > 0 ? ratioOpts : ['16:9', '9:16', '1:1']
   // 模式下拉始终显示：未选模型时用通用能力兜底，选好后切到该模型真实能力
@@ -219,11 +224,13 @@ const GenerateNode = memo(function GenerateNode({ id, data }: NodeProps) {
           </div>
         )}
         <textarea value={d.inlinePrompt || ''} onChange={e => setData({ inlinePrompt: e.target.value })} placeholder="附加提示词（可选），未连提示词节点时必填" rows={2} className="w-full bg-[var(--color-surface-3)] text-[12px] text-[var(--color-ink)] placeholder:text-[var(--color-ink-tertiary)] rounded-lg px-2 py-1.5 outline-none resize-none mt-2 border border-transparent focus:border-[var(--color-primary)]/30" />
+        {d.capability === 'r2v' && <ReferenceSettings id={id} data={d} />}
         {status?.error && <p className="text-[11px] text-[var(--color-danger)] mt-1">{status.error}</p>}
-        {status?.video_src && <video src={status.video_src} className="w-full rounded-lg mt-2" controls />}
-        <button onClick={run} disabled={running || !d.model} className="flex items-center justify-center gap-1.5 w-full py-1.5 mt-2 text-[12px] text-white bg-brand-gradient rounded-lg hover:shadow-md disabled:opacity-40 transition-all">
-          {running ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
-          {running ? '生成中…' : '运行'}
+        {runError && <p role="alert" className="text-[11px] text-[var(--color-danger)] mt-1">{runError}</p>}
+        {status?.video_src && <NodeVideo src={status.video_src} title={nodeName || '生成视频'} testId={`generated-video-${id}`} />}
+        <button onClick={run} disabled={running || nodeBusy || ctx?.canvasRunning || !d.model} className="nodrag flex items-center justify-center gap-1.5 w-full py-1.5 mt-2 text-[12px] text-white bg-brand-gradient rounded-lg hover:shadow-md disabled:opacity-40 transition-all">
+          {running || nodeBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+          {status?.status === 'queued' ? '等待生成…' : running || nodeBusy ? '生成中…' : status?.video_src ? '重新生成' : '运行'}
         </button>
       </NodeShell>
 

@@ -9,19 +9,22 @@ from sqlalchemy.orm import Session
 
 from .catalog import get_model
 from .canvas_graph import media_handles
+from .canvas_references import bind_references
 from .config import settings
 from .models import Canvas, CanvasNode, Message, User
 from .routers.conversations import _validate
 from .schemas import GenerateRequest
 
 
-def prepare_generation(
+def generation_input(
     db: Session,
     canvas: Canvas,
     node: CanvasNode,
     user: User,
     request: Request,
-) -> Message:
+    *,
+    generated_urls: dict[str, str] | None = None,
+) -> dict:
     if node.type != "generate":
         raise HTTPException(status_code=400, detail="只有生成节点可以运行")
 
@@ -31,11 +34,17 @@ def prepare_generation(
             incoming[edge.target_handle].append(edge)
     nodes = {item.id: item for item in canvas.nodes}
     prompt_edges = incoming.get("prompt")
+    prompt_parts = []
     if prompt_edges:
         prompt_node = nodes.get(prompt_edges[0].source)
-        prompt = str((prompt_node.data if prompt_node else {}).get("text", "")).strip()
-    else:
-        prompt = str((node.data or {}).get("inlinePrompt", "")).strip()
+        prompt_parts.append(str((prompt_node.data if prompt_node else {}).get("text", "")).strip())
+    # Legacy canvases keep connected-prompt precedence. Reference settings opt
+    # into adding the node's local reference instructions to the connected text.
+    if not prompt_edges or ((node.data or {}).get("capability") == "r2v" and (
+        (node.data or {}).get("reference_bindings") or "{{" in str((node.data or {}).get("inlinePrompt", ""))
+    )):
+        prompt_parts.append(str((node.data or {}).get("inlinePrompt", "")).strip())
+    prompt = "\n\n".join(part for part in prompt_parts if part)
     if not prompt:
         raise HTTPException(status_code=400, detail="提示词不能为空，请连接提示词节点或填写内联提示词")
 
@@ -48,7 +57,7 @@ def prepare_generation(
         handles = media_handles(node)
         for spec in capability.input_specs():
             connected_for_kind = sum(
-                1 for handle in handles.get(spec.kind, []) if incoming.get(handle)
+                len(incoming.get(handle, [])) for handle in handles.get(spec.kind, [])
             )
             if connected_for_kind < spec.min_count:
                 raise HTTPException(status_code=400, detail=f"{spec.label} 至少需要 {spec.min_count} 个")
@@ -63,18 +72,28 @@ def prepare_generation(
                 for edge in attached:
                     source = nodes.get(edge.source)
                     url = str((source.data if source else {}).get("url", "")).strip()
+                    if source is not None and source.type == "generate":
+                        if generated_urls is not None:
+                            url = generated_urls.get(source.id, "")
+                        else:
+                            upstream = db.get(Message, source.message_id) if source.message_id else None
+                            url = upstream.video_url if upstream and upstream.status == "succeeded" else ""
                     if not url:
                         raise HTTPException(status_code=400, detail=f"{handle} 对应的{spec.label}为空")
                     media_inputs.append({
+                        "_edge_id": edge.id,
                         "kind": spec.kind,
                         "url": url,
-                        "name": str((source.data if source else {}).get("name", "")),
+                        "name": str((source.data if source else {}).get("name") or (source.data if source else {}).get("label") or ""),
                     })
         if len(media_inputs) < capability.minimum_media():
             raise HTTPException(
                 status_code=400,
                 detail=f"至少连接 {capability.minimum_media()} 个参考素材",
             )
+
+    if capability_id == "r2v":
+        prompt, media_inputs = bind_references(str(data.get("model", "")), prompt, media_inputs, data.get("reference_bindings") or [])
 
     try:
         payload = GenerateRequest(
@@ -93,7 +112,6 @@ def prepare_generation(
         raise HTTPException(status_code=400, detail="生成节点参数不完整") from exc
 
     media = _validate(payload, user, request, db)
-    images = [item["url"] for item in media if item["kind"] == "image"]
     params = {
         "capability": payload.capability,
         "resolution": payload.resolution,
@@ -108,13 +126,23 @@ def prepare_generation(
     if model and model.supports_audio:
         params["audio"] = model.audio_default if payload.audio is None else payload.audio
 
+    return {"id": node.id, "type": "generate", "prompt": prompt,
+            "model": payload.model, **params, "reference_media": media}
+
+
+def prepare_generation(db: Session, canvas: Canvas, node: CanvasNode, user: User, request: Request) -> Message:
+    frozen = generation_input(db, canvas, node, user, request)
+    media = frozen["reference_media"]
+    params = {key: value for key, value in frozen.items()
+              if key not in {"id", "type", "prompt", "model", "reference_media"}}
+
     message = Message(
         conversation_id=canvas.id,
         role="assistant",
-        resolved_prompt=prompt,
-        model=payload.model,
+        resolved_prompt=frozen["prompt"],
+        model=frozen["model"],
         params=params,
-        reference_images=images,
+        reference_images=[item["url"] for item in media if item["kind"] == "image"],
         reference_media=media,
         status="pending",
     )
@@ -122,6 +150,8 @@ def prepare_generation(
     db.flush()
     node.message_id = message.id
     node.status = "pending"
+    node.data = {key: value for key, value in (node.data or {}).items()
+                 if key not in {"outputFile", "outputVideoSrc", "outputError"}}
     db.commit()
     db.refresh(message)
     return message
@@ -177,15 +207,8 @@ async def compose_canvas_output(
 ) -> str:
     """按 output.data.items 顺序与 transitions 转场合成最终视频，返回文件名。"""
     data = output_node.data or {}
-    items = data.get("items") or []
+    items = output_items(canvas, output_node)
     transitions = {t.get("after"): t.get("type") for t in (data.get("transitions") or [])}
-    # 连线事实兜底：items 为空时用连线顺序（与前端展示一致）
-    if not items and canvas.edges:
-        items = [
-            {"nodeKey": e.source}
-            for e in sorted(canvas.edges, key=lambda x: x.id)
-            if e.target == output_node.id
-        ]
     nodes_by_id = {n.id: n for n in canvas.nodes}
     clips: list[tuple[str, str]] = []   # (filename, 该片段出转场类型)
     for it in items:
@@ -194,6 +217,25 @@ async def compose_canvas_output(
         if node is None or node.type != "generate":
             continue
         clips.append((_clip_of(node), str(transitions.get(key) or "none")))
+    return await compose_video_clips(clips, canvas.id)
+
+
+def output_items(canvas: Canvas, node: CanvasNode) -> list[dict]:
+    """Saved order first, then new connections; removed/disconnected clips stay out."""
+    by_id = {item.id: item for item in canvas.nodes}
+    connected = list(dict.fromkeys(edge.source for edge in canvas.edges
+        if edge.target == node.id and edge.target_handle == "input"
+        and by_id.get(edge.source) is not None and by_id[edge.source].type == "generate"))
+    data = node.data or {}
+    excluded = set(data.get("excluded") or [])
+    ordered = list(dict.fromkeys(item["nodeKey"] for item in data.get("items") or []
+        if item.get("nodeKey") in connected and item["nodeKey"] not in excluded))
+    ordered.extend(key for key in connected if key not in ordered and key not in excluded)
+    return [{"nodeKey": key} for key in ordered]
+
+
+async def compose_video_clips(clips: list[tuple[str, str]], canvas_id: str) -> str:
+    """Compose frozen local clip filenames, shared by manual and queued runs."""
     if not clips:
         raise HTTPException(406, "没有任何可合成的已生成片段")
     # 最后一段没有"下一段"，出转场无意义（前端也不渲染该控件）；
@@ -204,7 +246,7 @@ async def compose_canvas_output(
     stem = _uuid.uuid4().hex[:12]
     # 无转场（全部 none / 单片段）：concat demuxer 一步到位
     if len(clips) == 1 or all(t == "none" for _, t in clips):
-        return await _concat_plain(clips, stem, f"canvas-{canvas.id[:8]}-{stem}.mp4")
+        return await _concat_plain(clips, stem, f"canvas-{canvas_id[:8]}-{stem}.mp4")
 
     # 分组拼接：出转场为 none 的相邻段先用 concat 滤镜并成一组，组间再 xfade——
     # 否则中间的"直接切换"会被 xfade 默认值静默替换成 fade。
@@ -266,7 +308,7 @@ async def compose_canvas_output(
         chain.append(f"{cur}{group_labels[gi]}xfade=transition={effect}:duration={dur}:offset={offset:.3f}[x{gi}]")
         cur = f"[x{gi}]"
     graph = ";".join(chain) + f";{cur}format=yuv420p[vout]"
-    target = settings.video_dir / f"canvas-{canvas.id[:8]}-{stem}.mp4"
+    target = settings.video_dir / f"canvas-{canvas_id[:8]}-{stem}.mp4"
     code, stderr = await _run_ffmpeg(
         "-y", *inputs,
         "-filter_complex", graph,

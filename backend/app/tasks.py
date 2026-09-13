@@ -91,7 +91,12 @@ async def _poll_until_done(provider, task_id: str, message_id: str, started: flo
                 _update(message_id, status="failed", error="任务成功但接口未返回视频地址")
                 return
             local_video = ""
-            if settings.download_videos:
+            with SessionLocal() as db:
+                message = db.get(Message, message_id)
+                # Scheduled generate/compose runs require local clips even when
+                # ordinary single-video downloads are disabled in configuration.
+                needs_local_clip = bool(message and (message.params or {}).get("agent_run_id"))
+            if settings.download_videos or needs_local_clip:
                 local_video = await _download_video(video_url, message_id)
             _update(
                 message_id,
@@ -279,7 +284,9 @@ async def resume_unfinished() -> None:
             .filter(Message.role == "assistant", Message.status.in_(["pending", "running"]))
             .all()
         )
-        items = [(m.id, m.task_id) for m in pending]
+        # Durable run workers own these messages, including dependency order and
+        # restart recovery. Starting them here too could submit/poll twice.
+        items = [(m.id, m.task_id) for m in pending if not (m.params or {}).get("agent_run_id")]
     finally:
         db.close()
 
