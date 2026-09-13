@@ -24,6 +24,8 @@ export interface MediaNodeData extends Record<string, unknown> {
 
 export interface OutputNodeData extends Record<string, unknown> {
   label: string
+  outputFile?: string
+  outputVideoSrc?: string
 }
 
 export interface GenerateNodeData extends Record<string, unknown> {
@@ -61,6 +63,8 @@ export interface CanvasSummary {
   viewport: Viewport
   created_at: string
   updated_at: string
+  revision: number
+  control_version: number
 }
 
 export interface CanvasNodeRecord {

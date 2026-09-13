@@ -73,7 +73,7 @@ class Settings:
         self.secret_key = os.getenv("SECRET_KEY", "please-change-this-secret")
         self.token_expire_minutes = _int("TOKEN_EXPIRE_MINUTES", 60 * 24 * 7)
 
-        self.data_dir = Path(os.getenv("DATA_DIR") or (BASE_DIR / "data"))
+        self.data_dir = Path(os.getenv("DATA_DIR") or (BASE_DIR / "data")).resolve()
         self.upload_dir = self.data_dir / "uploads"
         self.video_dir = self.data_dir / "videos"
         for d in (self.data_dir, self.upload_dir, self.video_dir):
@@ -176,12 +176,19 @@ class Settings:
         self.agent_model = os.getenv("AGENT_MODEL", "qwen-plus").strip()
         self.agent_api_key = (os.getenv("AGENT_API_KEY", "").strip() or self.api_keys["wan"])
         self.agent_temperature = _float("AGENT_TEMPERATURE", 0.3)
-        self.agent_max_tokens = _int("AGENT_MAX_TOKENS", 2048)
+        self.agent_max_tokens = _int("AGENT_MAX_TOKENS", 4096)
         self.agent_timeout_seconds = _int("AGENT_TIMEOUT_SECONDS", 60)
         self.agent_max_repair_attempts = _int("AGENT_MAX_REPAIR_ATTEMPTS", 2)
         self.agent_max_history_turns = _int("AGENT_MAX_HISTORY_TURNS", 8)
         self.agent_daily_token_limit = _int("AGENT_DAILY_TOKEN_LIMIT", 200000)
         self.agent_fallback_rules = _bool("AGENT_FALLBACK_RULES", True)
+        # v3: 对话式智能体配置
+        self.agent_chat_max_tokens = _int("AGENT_CHAT_MAX_TOKENS", 4096)
+        self.agent_max_tool_calls = _int("AGENT_MAX_TOOL_CALLS", 5)
+        self.agent_stream_idle_timeout = _int("AGENT_STREAM_IDLE_TIMEOUT", 120)
+        self.agent_enable_thinking = _bool("AGENT_ENABLE_THINKING", True)
+        self.agent_run_concurrency = max(1, _int("AGENT_RUN_CONCURRENCY", 2))
+        self.agent_task_max_attempts = max(1, _int("AGENT_TASK_MAX_ATTEMPTS", 2))
         frontend = os.getenv("FRONTEND_DIST")
         self.frontend_dist = Path(frontend) if frontend else BASE_DIR / "frontend" / "dist"
 

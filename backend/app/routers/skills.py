@@ -37,6 +37,10 @@ def install_skill(
         instructions=payload.instructions.strip(),
         enabled=payload.enabled,
         created_by=admin.id,
+        requires=payload.requires,
+        inputs=payload.inputs,
+        plan_shape=payload.plan_shape,
+        max_nodes=payload.max_nodes,
     )
     db.add(skill)
     try:
@@ -66,6 +70,14 @@ def update_skill(
         skill.instructions = payload.instructions.strip()
     if payload.enabled is not None:
         skill.enabled = payload.enabled
+    if payload.requires is not None:
+        skill.requires = payload.requires
+    if payload.inputs is not None:
+        skill.inputs = payload.inputs
+    if payload.plan_shape is not None:
+        skill.plan_shape = payload.plan_shape
+    if payload.max_nodes is not None:
+        skill.max_nodes = payload.max_nodes
     try:
         db.commit()
     except IntegrityError:

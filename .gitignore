@@ -5,6 +5,14 @@ node_modules/
 **/node_modules/
 dist/
 frontend/dist/
+# Local databases and browser test output
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+frontend/test-results/
+frontend/playwright-report/
+frontend/playwright/.cache/
 __pycache__/
 *.pyc
 *.mp4

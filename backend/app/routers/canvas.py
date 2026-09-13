@@ -2,16 +2,24 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from ..canvas_graph import GraphValidationError, validate_graph
-from ..canvas_executor import prepare_generation
+from ..canvas_executor import compose_canvas_output, prepare_generation
+from ..canvas_service import (
+    CanvasServiceError,
+    apply_agent_patch,
+    canvas_snapshot,
+    persist_canvas_graph,
+    undo_agent_operation,
+)
 from ..cleanup import delete_videos_for
 from ..database import get_db
-from ..media_links import sign_path
-from ..models import Canvas, CanvasEdge, CanvasNode, Conversation, Message, User
+from ..media_links import format_video_src, sign_path
+from ..models import Canvas, CanvasNode, Conversation, Message, User
 from ..schemas import (
     CanvasCreate,
+    CanvasAgentPatch,
     CanvasDetail,
     CanvasGraphPut,
     CanvasOut,
@@ -42,6 +50,9 @@ def _detail(canvas: Canvas) -> CanvasDetail:
         url = str((node.data or {}).get("url", ""))
         if url.startswith("/media/"):
             node.data = {**node.data, "signed_url": sign_path(url)}
+        output_file = str((node.data or {}).get("outputFile", ""))
+        if output_file:
+            node.data = {**node.data, "outputVideoSrc": format_video_src(output_file)}
     return detail
 
 
@@ -127,59 +138,94 @@ def save_graph(
     user: User = Depends(current_user),
 ):
     canvas = _own(db, canvas_id, user)
-    if payload.updated_at != canvas.updated_at:
-        raise HTTPException(
-            status_code=409,
-            detail="画布已在其他窗口更新，请刷新后继续编辑",
-        )
-
-    node_values = [node.model_dump() for node in payload.nodes]
-    edge_values = [edge.model_dump() for edge in payload.edges]
     try:
-        validate_graph(node_values, edge_values)
-    except GraphValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    existing_nodes = {node.id: node for node in canvas.nodes}
-    incoming_ids = {node.id for node in payload.nodes}
-    for edge in list(canvas.edges):
-        db.delete(edge)
-    for node in list(canvas.nodes):
-        if node.id not in incoming_ids:
-            db.delete(node)
-
-    for item in payload.nodes:
-        node = existing_nodes.get(item.id)
-        if node is None:
-            node = CanvasNode(
-                id=item.id,
-                canvas_id=canvas.id,
-                status="idle" if item.type == "generate" else "",
-            )
-            db.add(node)
-        node.type = item.type
-        node.position = item.position
-        node.size = item.size
-        node.data = item.data
-
-    db.flush()
-    for item in payload.edges:
-        db.add(
-            CanvasEdge(
-                id=item.id,
-                canvas_id=canvas.id,
-                source=item.source,
-                source_handle=item.source_handle,
-                target=item.target,
-                target_handle=item.target_handle,
-            )
+        persist_canvas_graph(
+            db,
+            canvas,
+            {
+                "viewport": payload.viewport,
+                "nodes": [node.model_dump() for node in payload.nodes],
+                "edges": [edge.model_dump() for edge in payload.edges],
+            },
+            expected_updated_at=payload.updated_at,
+            expected_revision=payload.revision,
         )
+    except CanvasServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return _detail(canvas)
 
-    canvas.viewport = payload.viewport
-    canvas.updated_at = _now()
+
+@router.get("/{canvas_id}/agent/context")
+def agent_canvas_context(
+    canvas_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    """Return the current authoritative graph for Agent inspection."""
+    return canvas_snapshot(_own(db, canvas_id, user))
+
+
+@router.post("/{canvas_id}/agent/patch")
+def patch_canvas_as_agent(
+    canvas_id: str,
+    payload: CanvasAgentPatch,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    canvas = _own(db, canvas_id, user)
+    try:
+        operation, changed = apply_agent_patch(
+            db, canvas, user,
+            base_revision=payload.base_revision,
+            control_version=payload.control_version,
+            idempotency_key=payload.idempotency_key,
+            operations=[item.model_dump(exclude_none=True) for item in payload.operations],
+        )
+    except CanvasServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return {
+        "operation_id": operation.id,
+        "changed": changed,
+        "summary": operation.summary,
+        "canvas": _detail(canvas),
+    }
+
+
+@router.post("/{canvas_id}/agent/undo")
+def undo_canvas_agent_operation(
+    canvas_id: str,
+    operation_id: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    canvas = _own(db, canvas_id, user)
+    try:
+        operation = undo_agent_operation(db, canvas, user, operation_id)
+    except CanvasServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return {"operation_id": operation.id, "canvas": _detail(canvas)}
+
+
+@router.post("/{canvas_id}/takeover")
+def take_over_canvas(
+    canvas_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    """Invalidate all Agent writes created under the previous control epoch."""
+    canvas = _own(db, canvas_id, user)
+    db.execute(update(Canvas).where(Canvas.id == canvas.id).values(
+        control_version=Canvas.control_version + 1,
+        revision=Canvas.revision + 1, updated_at=_now(),
+    ).execution_options(synchronize_session=False))
     db.commit()
     db.refresh(canvas)
-    return _detail(canvas)
+    return {
+        "canvas_id": canvas.id,
+        "revision": canvas.revision,
+        "control_version": canvas.control_version,
+        "message": "已停止智能体继续修改，画布现在由你接管",
+    }
 
 
 @router.get("/{canvas_id}/status")
@@ -190,19 +236,16 @@ def canvas_status(
 ):
     canvas = _own(db, canvas_id, user)
     result = []
-    changed = False
     for node in canvas.nodes:
         message = db.get(Message, node.message_id) if node.message_id else None
         status = message.status if message is not None else node.status
-        if status != node.status:
-            node.status = status
-            changed = True
         if message is None:
-            video_src = ""
+            output_file = str((node.data or {}).get("outputFile", ""))
+            video_src = format_video_src(output_file) if output_file else ""
         elif message.video_expired:
             video_src = ""
         elif message.local_video:
-            video_src = sign_path(f"/media/videos/{message.local_video}")
+            video_src = format_video_src(message.local_video)
         else:
             video_src = message.video_url
         result.append(
@@ -215,8 +258,6 @@ def canvas_status(
                 "error": message.error if message else "",
             }
         )
-    if changed:            # 轮询接口默认只读，状态真的变了才写库
-        db.commit()
     return result
 
 
@@ -245,3 +286,24 @@ def run_node(
     message = prepare_generation(db, canvas, node, user, request)
     spawn(message.id)
     return {"node_id": node.id, "status": node.status, "message_id": message.id}
+
+
+@router.post("/{canvas_id}/output/{node_id}/compose")
+async def compose_output(
+    canvas_id: str,
+    node_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    """最终输出合成：按输出节点的 items 顺序 + transitions 转场拼接已生成片段。"""
+    canvas = _own(db, canvas_id, user)
+    node = next((item for item in canvas.nodes if item.id == node_id), None)
+    if node is None or node.type != "output":
+        raise HTTPException(status_code=404, detail="输出节点不存在")
+    try:
+        filename = await compose_canvas_output(canvas, node)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"合成失败：{exc}") from exc
+    return {"video_src": format_video_src(filename), "filename": filename}

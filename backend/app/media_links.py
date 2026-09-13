@@ -59,3 +59,10 @@ def verify(path: str, expires: str | None, signature: str | None) -> tuple[bool,
     if not hmac.compare_digest(_digest(path, deadline), signature):
         return False, "链接签名无效"
     return True, ""
+
+
+def format_video_src(filename: str | None) -> str:
+    """产出文件名 → 带签名的播放地址；空文件名返回空串。"""
+    if not filename:
+        return ""
+    return sign_path(f"/media/videos/{filename}")

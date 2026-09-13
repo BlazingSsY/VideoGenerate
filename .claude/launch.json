@@ -2,18 +2,38 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "video-generate",
-      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "name": "frontend-dev",
+      "runtimeExecutable": "npm",
       "runtimeArgs": [
-        "-m",
-        "uvicorn",
-        "backend.app.main:app",
-        "--host",
-        "127.0.0.1",
+        "--prefix",
+        "frontend",
+        "run",
+        "dev",
+        "--",
         "--port",
-        "8008"
+        "5199",
+        "--strictPort"
       ],
-      "port": 8008
+      "env": {
+        "VITE_BACKEND_PROXY_TARGET": "http://127.0.0.1:8018"
+      }
+    },
+    {
+      "name": "frontend-dev-userdb",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "frontend",
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "5199",
+        "--strictPort"
+      ],
+      "env": {
+        "VITE_BACKEND_PROXY_TARGET": "http://127.0.0.1:8008"
+      }
     }
   ]
 }

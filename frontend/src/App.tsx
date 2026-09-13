@@ -1,212 +1,140 @@
-import { lazy, Suspense, useState } from 'react'
+import { lazy, Suspense, useState, useRef } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import {
-  App as AntApp,
-  Button,
-  Dropdown,
-  Form,
-  Input,
-  Layout,
-  Menu,
-  Modal,
-  Spin,
-  Tag,
-  Tooltip,
-} from 'antd'
-import {
-  ApartmentOutlined,
-  LogoutOutlined,
-  ExperimentOutlined,
-  MoonOutlined,
-  SunOutlined,
-  UserOutlined,
-  VideoCameraOutlined,
-} from '@ant-design/icons'
-
+import { Video, LogOut, KeyRound, Users as UsersIcon, Sparkles, ChevronDown } from 'lucide-react'
 import api, { errorText } from './api'
 import { useAuth } from './auth'
 import Login from './pages/Login'
-import Studio from './pages/Studio'
-import { useTheme } from './theme'
+import AgentDrawer from './components/agent/AgentDrawer'
+import { CanvasAgentBridgeContext, type CanvasAgentBinding } from './canvasAgentBridge'
+import { cn } from './lib/utils'
 
 const Canvas = lazy(() => import('./pages/Canvas'))
 const Users = lazy(() => import('./pages/Users'))
 const Skills = lazy(() => import('./pages/Skills'))
 
-const { Header, Content } = Layout
-
-function PasswordModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const [form] = Form.useForm()
-  const [saving, setSaving] = useState(false)
-  const { message } = AntApp.useApp()
-
-  const submit = async () => {
-    const values = await form.validateFields()
-    setSaving(true)
-    try {
-      await api.post('/api/auth/password', values)
-      message.success('密码已更新')
-      form.resetFields()
-      onClose()
-    } catch (error) {
-      message.error(errorText(error, '修改失败'))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Modal open={open} title="修改密码" onCancel={onClose} onOk={submit} confirmLoading={saving}>
-      <Form form={form} layout="vertical" style={{ marginTop: 12 }}>
-        <Form.Item name="old_password" label="原密码" rules={[{ required: true }]}>
-          <Input.Password autoComplete="current-password" />
-        </Form.Item>
-        <Form.Item
-          name="new_password"
-          label="新密码"
-          rules={[{ required: true, min: 6, message: '至少 6 位' }]}
-        >
-          <Input.Password autoComplete="new-password" />
-        </Form.Item>
-      </Form>
-    </Modal>
-  )
-}
-
 function Shell({ children }: { children: React.ReactNode }) {
   const { user, config, logout } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
-  const { mode, toggleTheme } = useTheme()
   const [pwdOpen, setPwdOpen] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [agentOpen, setAgentOpen] = useState(false)
+  const [canvasAgentBinding, setCanvasAgentBinding] = useState<CanvasAgentBinding | null>(null)
+  const oldPwdRef = useRef<HTMLInputElement>(null)
+  const newPwdRef = useRef<HTMLInputElement>(null)
+  const [pwdSaving, setPwdSaving] = useState(false)
+  const [pwdError, setPwdError] = useState('')
 
-  const primaryItems = [
-    { key: '/', label: '生成工作台', icon: <VideoCameraOutlined /> },
-    { key: '/canvas', label: '创意画布', icon: <ApartmentOutlined /> },
-  ]
-
-  const accountItems = [
-    ...(user?.role === 'admin'
-      ? [
-          { key: 'users', label: '用户管理', icon: <UserOutlined /> },
-          { key: 'skills', label: 'Skills 管理', icon: <ExperimentOutlined /> },
-          { type: 'divider' as const },
-        ]
-      : []),
-    { key: 'pwd', label: '修改密码' },
-    { key: 'logout', label: '退出登录', icon: <LogoutOutlined />, danger: true },
-  ]
+  const submitPwd = async () => {
+    const old_password = oldPwdRef.current?.value || ''
+    const new_password = newPwdRef.current?.value || ''
+    if (!old_password || new_password.length < 6) { setPwdError('新密码至少 6 位'); return }
+    setPwdSaving(true); setPwdError('')
+    try {
+      await api.post('/api/auth/password', { old_password, new_password })
+      setPwdOpen(false)
+      oldPwdRef.current!.value = ''; newPwdRef.current!.value = ''
+    } catch (error) { setPwdError(errorText(error, '修改失败')) }
+    finally { setPwdSaving(false) }
+  }
 
   return (
-    <Layout className="app-layout">
-      <Header className="app-header" style={{ height: 56, lineHeight: '56px' }}>
-        <div className="app-brand">
-          <span className="brand-mark">
-            <VideoCameraOutlined />
-          </span>
-          <span className="brand-text">{config?.app_name || '视频生成工作台'}</span>
+    <CanvasAgentBridgeContext.Provider value={{ binding: canvasAgentBinding, setBinding: setCanvasAgentBinding }}>
+    <div className="flex flex-col h-screen overflow-hidden bg-[var(--color-bg)]">
+      {/* Top bar — TapNow style: minimal, dark, icon-driven */}
+      <header className="flex items-center justify-between h-12 px-4 border-b border-[var(--color-border)] bg-[var(--color-surface-1)] shrink-0 z-30">
+        <div className="flex items-center gap-2.5">
+          <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-brand-logo">
+            <Video className="w-3.5 h-3.5 text-white" />
+          </div>
+          <span className="text-sm font-medium text-[var(--color-ink)]">{config?.app_name || '视频生成工作台'}</span>
         </div>
-        <Menu
-          className="app-primary-nav"
-          mode="horizontal"
-          selectedKeys={[location.pathname]}
-          items={primaryItems}
-          onClick={(event) => navigate(event.key)}
-        />
-        <div className="app-header-actions">
-          <Tooltip title={mode === 'light' ? '切换至深色模式' : '切换至浅色模式'}>
-            <Button
-              type="text"
-              shape="circle"
-              className="theme-toggle"
-              icon={mode === 'light' ? <MoonOutlined /> : <SunOutlined />}
-              aria-label={mode === 'light' ? '切换至深色模式' : '切换至浅色模式'}
-              aria-pressed={mode === 'dark'}
-              onClick={toggleTheme}
-            />
-          </Tooltip>
-          <Dropdown
-            menu={{
-              items: accountItems,
-              onClick: ({ key }) => {
-                if (key === 'users') navigate('/users')
-                else if (key === 'skills') navigate('/skills')
-                else if (key === 'pwd') setPwdOpen(true)
-                else if (key === 'logout') logout()
-              },
-            }}
-          >
-            <Button type="text" className="app-account-button" icon={<UserOutlined />}>
-              <span className="app-account-name">{user?.display_name || user?.username}</span>
-              <Tag
-                className="app-account-role"
-                color={user?.role === 'admin' ? 'blue' : 'default'}
-                style={{ marginLeft: 8 }}
-              >
-                {user?.role === 'admin' ? '管理员' : '普通用户'}
-              </Tag>
-            </Button>
-          </Dropdown>
+
+        <nav className="flex items-center gap-0.5">
+          <button onClick={() => navigate('/')} className={cn(
+            'px-3 py-1.5 text-xs rounded-md transition-colors',
+            location.pathname === '/' ? 'text-[var(--color-primary)] bg-[var(--color-surface-3)]' : 'text-[var(--color-ink-secondary)] hover:text-[var(--color-ink)] hover:bg-[var(--color-surface-3)]'
+          )}>创意画布</button>
+          {user?.role === 'admin' && (<>
+            <button onClick={() => navigate('/users')} className={cn(
+              'flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md transition-colors',
+              location.pathname === '/users' ? 'text-[var(--color-primary)] bg-[var(--color-surface-3)]' : 'text-[var(--color-ink-secondary)] hover:text-[var(--color-ink)] hover:bg-[var(--color-surface-3)]'
+            )}><UsersIcon className="w-3 h-3" /> 用户</button>
+            <button onClick={() => navigate('/skills')} className={cn(
+              'flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md transition-colors',
+              location.pathname === '/skills' ? 'text-[var(--color-primary)] bg-[var(--color-surface-3)]' : 'text-[var(--color-ink-secondary)] hover:text-[var(--color-ink)] hover:bg-[var(--color-surface-3)]'
+            )}><Sparkles className="w-3 h-3" /> 技能</button>
+          </>)}
+        </nav>
+
+        <div className="relative">
+          <button onClick={() => setMenuOpen(!menuOpen)} className="flex items-center gap-1.5 px-2 py-1 text-xs rounded-md hover:bg-[var(--color-surface-3)] transition-colors">
+            <div className="flex items-center justify-center w-6 h-6 rounded-full bg-brand-gradient text-white text-[10px] font-medium">
+              {(user?.display_name || user?.username || '?')[0]}
+            </div>
+            <span className="text-[var(--color-ink)] hidden sm:inline">{user?.display_name || user?.username}</span>
+            <ChevronDown className="w-3 h-3 text-[var(--color-ink-tertiary)]" />
+          </button>
+          {menuOpen && (<>
+            <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+            <div className="absolute right-0 top-full mt-1 w-44 bg-[var(--color-popover)] border border-[var(--color-border)] rounded-lg shadow-xl py-1 z-50 animate-fade-in">
+              <button onClick={() => { setMenuOpen(false); setPwdOpen(true) }} className="flex items-center gap-2 w-full px-3 py-2 text-xs text-[var(--color-ink-secondary)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-ink)] transition-colors">
+                <KeyRound className="w-3 h-3" /> 修改密码
+              </button>
+              <div className="h-px bg-[var(--color-border-soft)] my-1" />
+              <button onClick={() => { setMenuOpen(false); logout() }} className="flex items-center gap-2 w-full px-3 py-2 text-xs text-[var(--color-danger)] hover:bg-red-950/50 transition-colors">
+                <LogOut className="w-3 h-3" /> 退出登录
+              </button>
+            </div>
+          </>)}
         </div>
-      </Header>
-      <Content style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>{children}</Content>
-      <PasswordModal open={pwdOpen} onClose={() => setPwdOpen(false)} />
-    </Layout>
+      </header>
+
+      <div className="flex-1 flex flex-col min-h-0 relative">{children}</div>
+
+      {/* Agent Drawer — global, anchored to bottom like TapNow */}
+      <AgentDrawer
+        open={agentOpen}
+        onOpenChange={setAgentOpen}
+        canvasId={canvasAgentBinding?.canvasId || null}
+        onBeforeCanvasWrite={canvasAgentBinding?.save}
+        onCanvasChanged={canvasAgentBinding?.reload}
+        onRunStatusChanged={canvasAgentBinding?.refreshStatus}
+        onTakeOver={canvasAgentBinding?.takeOver}
+      />
+
+      {/* Password modal */}
+      {pwdOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setPwdOpen(false)}>
+          <div className="w-full max-w-sm bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-xl shadow-2xl p-6 animate-fade-in" onClick={e => e.stopPropagation()}>
+            <h2 className="text-base font-semibold mb-4 text-[var(--color-ink)]">修改密码</h2>
+            {pwdError && <p className="text-xs text-[var(--color-danger)] mb-3">{pwdError}</p>}
+            <div className="space-y-3">
+              <input ref={oldPwdRef} type="password" placeholder="原密码" className="w-full px-3 py-2 text-sm bg-[var(--color-surface-3)] border border-[var(--color-border)] rounded-lg outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 text-[var(--color-ink)] placeholder:text-[var(--color-ink-tertiary)]" />
+              <input ref={newPwdRef} type="password" placeholder="新密码（至少6位）" className="w-full px-3 py-2 text-sm bg-[var(--color-surface-3)] border border-[var(--color-border)] rounded-lg outline-none focus:ring-2 focus:ring-[var(--color-primary)]/30 text-[var(--color-ink)] placeholder:text-[var(--color-ink-tertiary)]" />
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setPwdOpen(false)} className="px-4 py-1.5 text-xs text-[var(--color-ink-secondary)] hover:text-[var(--color-ink)] transition-colors">取消</button>
+              <button onClick={submitPwd} disabled={pwdSaving} className="px-4 py-1.5 text-xs text-white bg-brand-gradient rounded-lg disabled:opacity-50">{pwdSaving ? '保存中…' : '保存'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+    </CanvasAgentBridgeContext.Provider>
   )
 }
 
 export default function App() {
   const { user, loading } = useAuth()
-
-  if (loading) {
-    return (
-      <div className="login-wrap">
-        <Spin size="large" />
-      </div>
-    )
-  }
-
-  if (!user) {
-    return (
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
-      </Routes>
-    )
-  }
-
+  if (loading) return <div className="flex items-center justify-center h-screen bg-[var(--color-bg)]"><div className="w-8 h-8 border-2 border-[var(--color-primary)] border-t-transparent rounded-full animate-spin" /></div>
+  if (!user) return (<Routes><Route path="/login" element={<Login />} /><Route path="*" element={<Navigate to="/login" replace />} /></Routes>)
   return (
     <Shell>
       <Routes>
-        <Route path="/" element={<Studio />} />
-        <Route
-          path="/canvas"
-          element={
-            <Suspense fallback={<div className="canvas-loading"><Spin size="large" /></div>}>
-              <Canvas />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/users"
-          element={
-            user.role === 'admin' ? (
-              <Suspense fallback={<div className="canvas-loading"><Spin size="large" /></div>}>
-                <Users />
-              </Suspense>
-            ) : <Navigate to="/" replace />
-          }
-        />
-        <Route
-          path="/skills"
-          element={
-            user.role === 'admin' ? (
-              <Suspense fallback={<div className="canvas-loading"><Spin size="large" /></div>}>
-                <Skills />
-              </Suspense>
-            ) : <Navigate to="/" replace />
-          }
-        />
+        <Route path="/" element={<Suspense fallback={<div className="flex items-center justify-center h-full"><div className="w-8 h-8 border-2 border-[var(--color-primary)] border-t-transparent rounded-full animate-spin" /></div>}><Canvas /></Suspense>} />
+        <Route path="/users" element={user.role === 'admin' ? <Suspense fallback={<div className="flex items-center justify-center h-full"><div className="w-8 h-8 border-2 border-[var(--color-primary)] border-t-transparent rounded-full animate-spin" /></div>}><Users /></Suspense> : <Navigate to="/" replace />} />
+        <Route path="/skills" element={user.role === 'admin' ? <Suspense fallback={<div className="flex items-center justify-center h-full"><div className="w-8 h-8 border-2 border-[var(--color-primary)] border-t-transparent rounded-full animate-spin" /></div>}><Skills /></Suspense> : <Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Shell>

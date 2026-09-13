@@ -38,34 +38,62 @@ def media_handles(node: Mapping[str, Any] | Any) -> dict[str, list[str]]:
     return result
 
 
+# Handle names are the single source of truth shared with the frontend canvas:
+# source handles: prompt / image / end_frame / video / audio (kind id), generate — output;
+# target handles: prompt, {kind}_{index} media slots, output node — input.
+_KIND_SOURCE_HANDLES = {"image", "end_frame", "video", "audio"}
+
+
 def _output_type(node: Mapping[str, Any], handle: str) -> str | None:
-    if handle != "out":
-        return None
-    return {
-        "prompt": "text",
-        "image": "image",
-        "video": "video",
-        "audio": "audio",
-        "generate": "video",
-    }.get(node.get("type"))
+    node_type = node.get("type")
+    if node_type == "prompt":
+        return "text" if handle == "prompt" else None
+    if node_type in ("image", "video", "audio", "end_frame"):
+        # the source handle id is simply the media kind
+        if node_type == "image" and handle == "image":
+            # image 节点仅保留单一 source handle；它可同时充当首帧图或尾帧图，
+            # 因此对 end_frame 槽也是一种合法源（目标槽的语义由 generate 侧决定）
+            return "image-or-end-frame"
+        return handle if handle in _KIND_SOURCE_HANDLES else None
+    if node_type == "generate":
+        return "video" if handle == "output" else None
+    return None
 
 
 def _input_type(node: Mapping[str, Any], handle: str) -> str | None:
     if node.get("type") == "output":
-        return "video" if handle == "in" else None
+        return "video" if handle == "input" else None
     if node.get("type") != "generate":
         return None
-    if handle == "prompt":
-        return "text"
+    return "text" if handle == "prompt" else _media_input_type(node, handle)
+
+
+def _media_input_type(node: Mapping[str, Any], handle: str) -> str | None:
     data = node.get("data") or {}
     model = get_model(str(data.get("model", "")))
     capability = model.capability(str(data.get("capability", ""))) if model else None
     if capability is None:
         return None
+    # end_frame slots pair with the image node's dedicated end_frame source
+    # handle — both sides speak the "end_frame" type (see _output_type).
     for kind, handles in media_handles(node).items():
         if handle in handles:
-            return "image" if kind == "end_frame" else kind
+            return kind
     return None
+
+
+def _is_aggregate_slot(node: Mapping[str, Any], handle: str) -> bool:
+    """此媒体槽是否为聚合槽：其 kind 的 spec.max_count > 1（r2v 参考素材）。"""
+    data = node.get("data") or {}
+    model = get_model(str(data.get("model", "")))
+    capability = model.capability(str(data.get("capability", ""))) if model else None
+    if capability is None or handle == "prompt":
+        return False
+    for kind, handles in media_handles(node).items():
+        if handle in handles:
+            spec = next((s for s in capability.input_specs() if s.kind == kind), None)
+            return bool(spec and spec.max_count > 1)
+    return False
 
 
 def validate_graph(
@@ -89,6 +117,7 @@ def validate_graph(
     adjacency: dict[str, list[str]] = defaultdict(list)
     indegree = {node_id: 0 for node_id in by_id}
     edge_ids: set[str] = set()
+    seen_pairs: set[tuple[str, str, str, str]] = set()
 
     for edge in edge_list:
         edge_id = str(edge.get("id", ""))
@@ -105,15 +134,34 @@ def validate_graph(
             raise GraphValidationError("节点不能连接到自身")
 
         target_key = (target, target_handle)
-        if target_key in occupied_targets:
+        # 聚合槽允许多条边共连一个视觉点：output.input（多片段拼接计划）与
+        # generate 的聚合媒体槽（r2v 参考图片/视频/音频 — max_count > 1 的 kind，
+        # 前端每类只渲染一个连接点）。单槽类（首帧图/尾帧图/prompt）仍一槽一边。
+        target_node = by_id[target]
+        is_output_input = str(target_node.get("type")) == "output" and target_handle == "input"
+        is_aggregate_media = (
+            str(target_node.get("type")) == "generate"
+            and target_handle != "prompt"
+            and _is_aggregate_slot(target_node, target_handle)
+        )
+        if not is_output_input and not is_aggregate_media and target_key in occupied_targets:
             raise GraphValidationError(f"输入槽 {target_handle} 只能连接一条边")
+        if (
+            source, source_handle, target, target_handle
+        ) in seen_pairs:
+            raise GraphValidationError("不能重复连接同一条线")
+        seen_pairs.add((source, source_handle, target, target_handle))
         occupied_targets.add(target_key)
 
         source_type = _output_type(by_id[source], source_handle)
         target_type = _input_type(by_id[target], target_handle)
         if source_type is None or target_type is None:
             raise GraphValidationError("连线使用了无效的输入或输出槽")
-        if source_type != target_type:
+        # image-or-end-frame：单一图片源 handle 允许落 image 槽或 end_frame 槽
+        compatible = source_type == target_type or (
+            source_type == "image-or-end-frame" and target_type in ("image", "end_frame")
+        )
+        if not compatible:
             raise GraphValidationError(
                 f"连线类型不匹配：{source_type} 不能连接到 {target_type}"
             )

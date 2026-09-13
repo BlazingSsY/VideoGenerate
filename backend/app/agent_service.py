@@ -6,6 +6,7 @@ be accepted. Provider output is never executed directly.
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request
 from sqlalchemy.orm import Session
@@ -13,7 +14,7 @@ from sqlalchemy.orm import Session
 from .agent_provider import AgentError, AgentResult, plan as provider_plan
 from .catalog import I2V, R2V, T2V, get_model, models_for_role
 from .config import settings
-from .models import User
+from .models import Asset, User
 from .routers.conversations import _validate
 from .schemas import GenerateRequest
 
@@ -48,8 +49,50 @@ def estimate(plan: dict) -> tuple[float, int]:
     return round(cost, 2), seconds
 
 
+def _validated_reference_media(
+    db: Session, user: User, values: list[Any], end_frame: Any,
+) -> list[dict[str, str]]:
+    """Resolve owned asset ids and normalize media before request validation."""
+    raw_values = list(values or [])
+    if end_frame and not isinstance(end_frame, bool):
+        raw_values.append(
+            {"kind": "end_frame", "url": end_frame}
+            if isinstance(end_frame, str)
+            else {**end_frame, "kind": "end_frame"}
+        )
+    resolved: list[dict[str, str]] = []
+    for raw in raw_values:
+        if isinstance(raw, str):
+            raw = {"kind": "image", "url": raw}
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=400, detail="计划中的参考素材格式无效")
+        kind = str(raw.get("kind") or "image")
+        asset_id = str(raw.get("asset_id") or "")
+        if asset_id:
+            asset = db.get(Asset, asset_id)
+            if asset is None or asset.user_id != user.id:
+                raise HTTPException(status_code=403, detail="无权使用计划引用的素材")
+            url = asset.source_url or (f"/media/uploads/{asset.filename}" if asset.filename else "")
+            name = str(raw.get("name") or asset.name or "")
+            if kind == "image" and asset.kind in {"video", "audio"}:
+                kind = asset.kind
+        else:
+            url = str(raw.get("url") or "").strip()
+            name = str(raw.get("name") or "")
+        if url.startswith("/media/"):
+            url = urlsplit(url).path
+        resolved.append({"kind": kind, "url": url, "name": name})
+    return resolved
+
+
 def _fallback_plan(user: User, text: str, media: list[dict], target_duration: int | None) -> tuple[str, dict]:
-    capability_id = I2V if len(media) == 1 and media[0].get("kind") == "image" else R2V if media else T2V
+    # i2v：首帧+尾帧（或单图）——kind 全是图片类且条数 ≤2；r2v：多图/带视频；否则 t2v
+    if media and all(item.get("kind") in ("image", "end_frame") for item in media) and len(media) <= 2:
+        capability_id = I2V
+    elif media:
+        capability_id = R2V
+    else:
+        capability_id = T2V
     candidates = [m for m in models_for_role(user.role) if m.capability(capability_id)]
     if not candidates:
         raise HTTPException(status_code=400, detail="当前账号没有可用于该创作请求的模型")
@@ -73,8 +116,12 @@ def _fallback_plan(user: User, text: str, media: list[dict], target_duration: in
             "id": f"shot-{index + 1}", "type": "generate", "prompt": text.strip(),
             "model": model.id, "capability": capability_id, "resolution": model.default_resolution,
             "ratio": model.default_ratio_for(capability_id), "duration": duration,
-            "reference_media": media if index == 0 else [], "end_frame": None,
-            "depends_on": [f"shot-{index}"] if index else [], "reason": f"第 {index + 1} 个镜头",
+            # Every i2v/r2v segment is an independent provider request, so each
+            # one must carry the required references rather than only the first.
+            "reference_media": media, "end_frame": None,
+            # Segment order belongs to compose.inputs. The clips themselves are
+            # independent and can therefore run within the configured concurrency.
+            "depends_on": [], "reason": f"第 {index + 1} 个镜头",
         })
     output = nodes[-1]["id"]
     if len(nodes) > 1:
@@ -123,12 +170,15 @@ def validate_plan(db: Session, user: User, request: Request | None, plan: dict) 
             )
             if (node.get("end_frame") is not None or node.get("require_end_frame")) and not supports_end_frame:
                 raise HTTPException(status_code=400, detail="当前模型的图生视频不支持尾帧输入")
+            reference_media = _validated_reference_media(
+                db, user, list(node.get("reference_media", []) or []), node.get("end_frame"),
+            )
             try:
                 payload = GenerateRequest(
                     prompt=str(node.get("prompt", "")), model=str(node.get("model", "")),
                     capability=str(node.get("capability", T2V)), resolution=str(node.get("resolution", "")),
                     ratio=str(node.get("ratio", "")), duration=int(node.get("duration", 0)),
-                    reference_media=node.get("reference_media", []), use_context=False,
+                    reference_media=reference_media, use_context=False,
                 )
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail="计划生成节点参数无效") from exc
@@ -148,6 +198,14 @@ def validate_plan(db: Session, user: User, request: Request | None, plan: dict) 
         for dependency in by_id[node_id].get("depends_on", []): visit(str(dependency))
         visiting.remove(node_id); visited.add(node_id)
     for node_id in by_id: visit(node_id)
+    output_node = str(plan.get("output_node") or "")
+    if not output_node:
+        # Compatibility for early planner/test payloads: normalize the implicit
+        # last node into the explicit contract before snapshot/import.
+        output_node = str(nodes[-1]["id"])
+        plan["output_node"] = output_node
+    if output_node not in by_id:
+        raise HTTPException(status_code=400, detail="计划必须指定存在的输出节点")
     cost, seconds = estimate(plan)
     target = int(plan.get("target_duration", seconds) or seconds)
     if target > 0 and abs(seconds - target) > max(3, target // 5):

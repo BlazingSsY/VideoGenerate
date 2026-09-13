@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..media_links import sign_path
-from ..models import Upload, User
+from ..models import Asset, Upload, User
 from ..schemas import UploadOut
 from ..security import current_user
 
@@ -113,8 +113,10 @@ async def upload_media(
     (settings.upload_dir / name).write_bytes(content)
     # 文件名不可当作授权；生成前会依据这条记录验证归属。
     # 先落库，失败时删掉刚写入的文件，避免产生不可管理的孤儿文件。
+    filename_only = Path(file.filename or "material").stem or "material"
     try:
         db.add(Upload(filename=name, user_id=user.id, kind=kind))
+        db.add(Asset(user_id=user.id, name=filename_only, kind=kind, filename=name))
         db.commit()
     except Exception:
         db.rollback()

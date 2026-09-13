@@ -15,7 +15,7 @@ from ..schemas import (
     MessageOut,
 )
 from ..cleanup import delete_videos_for
-from ..media_links import sign_path
+from ..media_links import format_video_src, sign_path
 from ..security import current_user
 from ..tasks import spawn
 
@@ -28,7 +28,7 @@ def serialize_message(message: Message) -> MessageOut:
     if message.video_expired:
         out.video_src = ""          # 文件已被保留期清理，前端会给出说明
     elif message.local_video:
-        out.video_src = sign_path(f"/media/videos/{message.local_video}")
+        out.video_src = format_video_src(message.local_video)
     else:
         out.video_src = message.video_url
     out.reference_image_urls = [sign_path(url) for url in (message.reference_images or [])]

@@ -1,26 +1,25 @@
-import { createContext, useContext } from 'react'
-
-import type { CanvasNodeData, CanvasRuntime } from '../../canvasTypes'
+import { createContext, useCallback, useContext } from 'react'
+import { useReactFlow } from '@xyflow/react'
 import type { VideoModel } from '../../types'
 
-interface CanvasNodeContextValue {
+export interface CanvasNodeContextValue {
   models: VideoModel[]
-  maxUploadMb: number
-  publicBaseUsable: boolean
-  runtime: Record<string, CanvasRuntime>
-  connected: Record<string, Set<string>>   // nodeId -> 已连线的输入槽
-  incoming: Record<string, Record<string, string>> // nodeId -> handle -> source node id
-  updateNodeData: (nodeId: string, patch: Partial<CanvasNodeData>) => void
-  removeEdgesForHandle: (nodeId: string, handle: string) => void
-  runNode: (nodeId: string) => Promise<void>
+  activeCanvasId: string | null
+  statusMap: Record<string, { status: string; message_id: string | null; video_src?: string; error?: string }>
+  refresh?: () => void
 }
 
-const CanvasNodeContext = createContext<CanvasNodeContextValue | null>(null)
-
+export const CanvasNodeContext = createContext<CanvasNodeContextValue | null>(null)
 export const CanvasNodeProvider = CanvasNodeContext.Provider
 
-export function useCanvasNodeContext() {
-  const value = useContext(CanvasNodeContext)
-  if (!value) throw new Error('CanvasNodeProvider is missing')
-  return value
+/**
+ * Node components receive `data` from ReactFlow, but must never mutate it in
+ * place — ReactFlow compares node.data by reference to decide re-renders.
+ * This helper is the single sanctioned way for nodes to patch their own data.
+ */
+export function useUpdateNodeData(id: string, data: Record<string, unknown>) {
+  const { setNodes } = useReactFlow()
+  return useCallback((patch: Record<string, unknown>) => {
+    setNodes(ns => ns.map(n => n.id === id ? { ...n, data: { ...data, ...patch } } : n))
+  }, [id, data, setNodes])
 }

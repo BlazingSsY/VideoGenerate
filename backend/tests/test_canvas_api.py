@@ -158,14 +158,14 @@ class CanvasApiTests(unittest.TestCase):
                 {
                     "id": "edge-prompt",
                     "source": "prompt-1",
-                    "source_handle": "out",
+                    "source_handle": "prompt",
                     "target": "generate-1",
                     "target_handle": "prompt",
                 },
                 {
                     "id": "edge-image",
                     "source": "image-1",
-                    "source_handle": "out",
+                    "source_handle": "image",
                     "target": "generate-1",
                     "target_handle": "image_0",
                 },
@@ -242,30 +242,30 @@ class CanvasApiTests(unittest.TestCase):
                 {
                     "id": "edge-prompt",
                     "source": "prompt-1",
-                    "source_handle": "out",
+                    "source_handle": "prompt",
                     "target": "generate-1",
                     "target_handle": "prompt",
                 },
                 {
                     "id": "edge-video",
                     "source": "video-1",
-                    "source_handle": "out",
+                    "source_handle": "video",
                     "target": "generate-1",
                     "target_handle": "video_0",
                 },
                 {
                     "id": "edge-audio",
                     "source": "audio-1",
-                    "source_handle": "out",
+                    "source_handle": "audio",
                     "target": "generate-1",
                     "target_handle": "audio_0",
                 },
                 {
                     "id": "edge-output",
                     "source": "generate-1",
-                    "source_handle": "out",
+                    "source_handle": "output",
                     "target": "output-1",
-                    "target_handle": "in",
+                    "target_handle": "input",
                 },
             ],
         }
@@ -297,6 +297,107 @@ class CanvasApiTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(message.reference_images, [])
+
+    def test_run_r2v_aggregate_slot_collects_all_shared_edges(self):
+        """两个图片素材连到同一 image_0 聚合点：生成时全部收进 reference_media。"""
+        self.current_user_id = self.admin_id  # wan3.0 仅 admin 可用
+        created = self.client.post("/api/canvases", json={}).json()
+        graph = {
+            "updated_at": created["updated_at"],
+            "viewport": {"x": 0, "y": 0, "zoom": 1},
+            "nodes": [
+                {
+                    "id": "prompt-1",
+                    "type": "prompt",
+                    "position": {"x": 0, "y": 0},
+                    "data": {"text": "融合两张参考图的人物与风格"},
+                },
+                {
+                    "id": "image-1",
+                    "type": "image",
+                    "position": {"x": 0, "y": 160},
+                    "data": {"url": "https://example.com/person.jpg", "name": "人物"},
+                },
+                {
+                    "id": "image-2",
+                    "type": "image",
+                    "position": {"x": 0, "y": 320},
+                    "data": {"url": "https://example.com/style.jpg", "name": "风格"},
+                },
+                {
+                    "id": "generate-1",
+                    "type": "generate",
+                    "position": {"x": 420, "y": 0},
+                    "data": {
+                        "model": "wan3.0-video-prime",
+                        "capability": "r2v",
+                        "resolution": "1080P",
+                        "ratio": "adaptive",
+                        "duration": 5,
+                        "watermark": False,
+                        "audio": True,
+                        "inlinePrompt": "",
+                    },
+                },
+            ],
+            "edges": [
+                {
+                    "id": "edge-prompt",
+                    "source": "prompt-1",
+                    "source_handle": "prompt",
+                    "target": "generate-1",
+                    "target_handle": "prompt",
+                },
+                {
+                    "id": "edge-image-1",
+                    "source": "image-1",
+                    "source_handle": "image",
+                    "target": "generate-1",
+                    "target_handle": "image_0",
+                },
+                {
+                    "id": "edge-image-2",
+                    "source": "image-2",
+                    "source_handle": "image",
+                    "target": "generate-1",
+                    "target_handle": "image_0",
+                },
+            ],
+        }
+        saved = self.client.put(f"/api/canvases/{created['id']}/graph", json=graph)
+        self.assertEqual(saved.status_code, 200)
+
+        with patch("app.routers.canvas.spawn") as spawn:
+            response = self.client.post(
+                f"/api/canvases/{created['id']}/nodes/generate-1/run"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        spawn.assert_called_once()
+        with self.Session() as db:
+            message = db.get(Message, response.json()["message_id"])
+            self.assertEqual(
+                message.reference_media,
+                [
+                    {
+                        "kind": "image",
+                        "url": "https://example.com/person.jpg",
+                        "name": "人物",
+                    },
+                    {
+                        "kind": "image",
+                        "url": "https://example.com/style.jpg",
+                        "name": "风格",
+                    },
+                ],
+            )
+            self.assertEqual(
+                message.reference_images,
+                [
+                    "https://example.com/person.jpg",
+                    "https://example.com/style.jpg",
+                ],
+            )
 
 
 if __name__ == "__main__":

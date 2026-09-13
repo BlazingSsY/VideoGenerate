@@ -13,8 +13,19 @@ from .config import settings
 from sqlalchemy import inspect, text
 
 from .database import Base, SessionLocal, engine
-from .models import AgentRun, AgentTask, User
-from .routers import agent, auth, canvas, catalog, conversations, media, skills, uploads, users
+from .migrations import migrate_agent_constraints
+from .models import (
+    AgentCanvasImport,
+    AgentChatMessage,
+    AgentRun,
+    AgentRunEvent,
+    AgentStep,
+    AgentTask,
+    Asset,
+    CanvasOperation,
+    User,
+)
+from .routers import agent, assets, auth, canvas, catalog, conversations, media, skills, uploads, users
 from .security import hash_password
 from .cleanup import run_periodically
 from .tasks import bind_loop, resume_unfinished
@@ -22,6 +33,51 @@ from .agent_executor import bind_loop as bind_agent_loop, resume_runs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _seed_default_skills() -> None:
+    """Create the initial v3 skill catalog if none exists."""
+    from .models import PromptSkill
+    db = SessionLocal()
+    try:
+        if db.query(PromptSkill).count() > 0:
+            return
+        skills = [
+            PromptSkill(name="一句话成片", description="最快路径，一段提示词直接生成",
+                instructions="把用户输入扩写为一条完整的视频提示词，包含画面、运镜、风格、光影细节。",
+                enabled=True, plan_shape="single", max_nodes=1),
+            PromptSkill(name="分镜短片", description="把脚本拆成多个镜头分别生成再拼接",
+                instructions="将用户描述的场景拆成2-6个镜头，每个镜头独立生成，最后顺序拼接。每个镜头的提示词要包含完整的画面描述。",
+                enabled=True, plan_shape="storyboard", max_nodes=6,
+                requires={"capability":"t2v"}),
+            PromptSkill(name="让图动起来", description="上传一张图作为首帧，让画面动起来",
+                instructions="以用户上传的图片为首帧，描述如何让画面动起来：镜头运动、主体动作、环境变化。",
+                enabled=True, plan_shape="single", max_nodes=1,
+                requires={"capability":"i2v"}),
+            PromptSkill(name="角色一致性组镜", description="用同一批参考图跑多个镜头，保证人物不走样",
+                instructions="使用参考生视频(r2v)，用同一批角色参考图生成多个镜头。每个镜头提示词中用[Image 1]引用参考图。",
+                enabled=True, plan_shape="fanout", max_nodes=6,
+                requires={"capability":"r2v"}),
+            PromptSkill(name="商品多角度", description="电商多角度展示商品",
+                instructions="用参考生视频从多个角度展示商品：正面、侧面、细节、使用场景。每段5-10秒。",
+                enabled=True, plan_shape="fanout", max_nodes=6,
+                requires={"capability":"r2v"}),
+            PromptSkill(name="模型横评", description="同一提示词用不同模型并排比较效果",
+                instructions="用同一提示词和参数，分别用不同模型生成，方便对比效果差异。",
+                enabled=True, plan_shape="compare", max_nodes=3),
+            PromptSkill(name="迭代改进", description="基于已有结果修改优化",
+                instructions="根据用户的修改要求，在上一版计划基础上调整。输出完整的新计划，不做增量patch。",
+                enabled=True, plan_shape="refine", max_nodes=1),
+        ]
+        for skill in skills:
+            db.add(skill)
+        db.commit()
+        logger.info("已创建 %d 个默认技能", len(skills))
+    except Exception as exc:
+        db.rollback()
+        logger.warning("创建默认技能失败: %s", exc)
+    finally:
+        db.close()
 
 
 def init_db() -> None:
@@ -43,6 +99,15 @@ def init_db() -> None:
             connection.execute(
                 text("ALTER TABLE messages ADD COLUMN reference_media JSON NOT NULL DEFAULT '[]'")
             )
+    canvas_columns = {column["name"] for column in inspector.get_columns("canvases")}
+    canvas_migrations = {
+        "revision": "ALTER TABLE canvases ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
+        "control_version": "ALTER TABLE canvases ADD COLUMN control_version INTEGER NOT NULL DEFAULT 0",
+    }
+    for name, statement in canvas_migrations.items():
+        if name not in canvas_columns:
+            with engine.begin() as connection:
+                connection.execute(text(statement))
     agent_columns = {column["name"] for column in inspector.get_columns("agent_turns")}
     migrations = {
         "agent_model_id": "ALTER TABLE agent_turns ADD COLUMN agent_model_id VARCHAR(128) NOT NULL DEFAULT ''",
@@ -50,6 +115,8 @@ def init_db() -> None:
         "tokens_out": "ALTER TABLE agent_turns ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0",
         "repair_count": "ALTER TABLE agent_turns ADD COLUMN repair_count INTEGER NOT NULL DEFAULT 0",
         "warning": "ALTER TABLE agent_turns ADD COLUMN warning TEXT NOT NULL DEFAULT ''",
+        "plan_version": "ALTER TABLE agent_turns ADD COLUMN plan_version VARCHAR(64) NOT NULL DEFAULT ''",
+        "canvas_control_version": "ALTER TABLE agent_turns ADD COLUMN canvas_control_version INTEGER NOT NULL DEFAULT 0",
     }
     for name, statement in migrations.items():
         if name not in agent_columns:
@@ -58,6 +125,93 @@ def init_db() -> None:
     # Agent execution tables were added after the initial planning-only release.
     # create_all handles fresh installations; existing SQLite databases get them here.
     Base.metadata.create_all(bind=engine, tables=[AgentRun.__table__, AgentTask.__table__])
+    run_columns = {column["name"] for column in inspector.get_columns("agent_runs")}
+    run_migrations = {
+        "canvas_id": "ALTER TABLE agent_runs ADD COLUMN canvas_id VARCHAR(32)",
+        "canvas_revision": "ALTER TABLE agent_runs ADD COLUMN canvas_revision INTEGER NOT NULL DEFAULT 0",
+        "plan_version": "ALTER TABLE agent_runs ADD COLUMN plan_version VARCHAR(64) NOT NULL DEFAULT ''",
+        "input_snapshot": "ALTER TABLE agent_runs ADD COLUMN input_snapshot JSON NOT NULL DEFAULT '{}'",
+        "cancel_requested": "ALTER TABLE agent_runs ADD COLUMN cancel_requested BOOLEAN NOT NULL DEFAULT 0",
+    }
+    for name, statement in run_migrations.items():
+        if name not in run_columns:
+            with engine.begin() as connection:
+                connection.execute(text(statement))
+    task_columns = {column["name"] for column in inspector.get_columns("agent_tasks")}
+    task_migrations = {
+        "canvas_node_id": "ALTER TABLE agent_tasks ADD COLUMN canvas_node_id VARCHAR(64) NOT NULL DEFAULT ''",
+        "input_snapshot": "ALTER TABLE agent_tasks ADD COLUMN input_snapshot JSON NOT NULL DEFAULT '{}'",
+        "attempt_count": "ALTER TABLE agent_tasks ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0",
+    }
+    for name, statement in task_migrations.items():
+        if name not in task_columns:
+            with engine.begin() as connection:
+                connection.execute(text(statement))
+    migrate_agent_constraints(engine)
+    # v3: 对话式智能体新表
+    Base.metadata.create_all(bind=engine, tables=[AgentChatMessage.__table__, AgentStep.__table__, Asset.__table__])
+    Base.metadata.create_all(bind=engine, tables=[
+        AgentRunEvent.__table__, AgentCanvasImport.__table__, CanvasOperation.__table__,
+    ])
+
+    # v3: PromptSkill 扩列
+    skill_columns = {column["name"] for column in inspector.get_columns("prompt_skills")}
+    skill_migrations = {
+        "requires": "ALTER TABLE prompt_skills ADD COLUMN requires JSON DEFAULT '{}'",
+        "inputs": "ALTER TABLE prompt_skills ADD COLUMN inputs JSON DEFAULT '[]'",
+        "plan_shape": "ALTER TABLE prompt_skills ADD COLUMN plan_shape VARCHAR(16) NOT NULL DEFAULT 'single'",
+        "max_nodes": "ALTER TABLE prompt_skills ADD COLUMN max_nodes INTEGER NOT NULL DEFAULT 1",
+    }
+    for name, statement in skill_migrations.items():
+        if name not in skill_columns:
+            with engine.begin() as connection:
+                connection.execute(text(statement))
+
+    # v3: AgentTurn 扩列
+    turn_columns = {column["name"] for column in inspector.get_columns("agent_turns")}
+    turn_migrations = {
+        "intent": "ALTER TABLE agent_turns ADD COLUMN intent VARCHAR(16) NOT NULL DEFAULT ''",
+        "tool_call_count": "ALTER TABLE agent_turns ADD COLUMN tool_call_count INTEGER NOT NULL DEFAULT 0",
+        "reasoning_tokens": "ALTER TABLE agent_turns ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0",
+    }
+    for name, statement in turn_migrations.items():
+        if name not in turn_columns:
+            with engine.begin() as connection:
+                connection.execute(text(statement))
+
+    # 拼接计划（需求⑨）：output.input 接受多条 generate 边 — 重建 canvas_edges
+    # 去掉 UNIQUE(canvas_id, target, target_handle)。SQLite 无法 DROP 约束，
+    # 建临时表搬家；create_all 对已有表是 no-op，不会自动改。
+    edge_constraints = {
+        tc["name"] for tc in inspector.get_unique_constraints("canvas_edges")
+    } if "canvas_edges" in inspector.get_table_names() else set()
+    if "uq_canvas_target_handle" in edge_constraints:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE TABLE canvas_edges_migrate AS SELECT id, canvas_id, source, source_handle, target, target_handle FROM canvas_edges"
+            ))
+            connection.execute(text("DROP TABLE canvas_edges"))
+            connection.execute(text(
+                "CREATE TABLE canvas_edges (\n"
+                "  id VARCHAR(64) NOT NULL PRIMARY KEY,\n"
+                "  canvas_id VARCHAR(64),\n"
+                "  source VARCHAR(64) NOT NULL,\n"
+                "  source_handle VARCHAR(32) NOT NULL,\n"
+                "  target VARCHAR(64) NOT NULL,\n"
+                "  target_handle VARCHAR(32) NOT NULL,\n"
+                "  FOREIGN KEY(canvas_id) REFERENCES canvases (id) ON DELETE CASCADE\n"
+                ")"
+            ))
+            connection.execute(text(
+                "INSERT INTO canvas_edges (id, canvas_id, source, source_handle, target, target_handle) "
+                "SELECT id, canvas_id, source, source_handle, target, target_handle FROM canvas_edges_migrate"
+            ))
+            connection.execute(text("DROP TABLE canvas_edges_migrate"))
+            connection.execute(text("CREATE INDEX ix_canvas_edges_canvas_id ON canvas_edges (canvas_id)"))
+
+    # v3: Seed default skills
+    _seed_default_skills()
+
     db = SessionLocal()
     try:
         if db.query(User).count() == 0:
@@ -160,6 +314,7 @@ app.include_router(skills.router)
 app.include_router(catalog.router)
 app.include_router(agent.router)
 app.include_router(uploads.router)
+app.include_router(assets.router)
 app.include_router(conversations.router)
 app.include_router(canvas.router)
 app.include_router(media.router)
