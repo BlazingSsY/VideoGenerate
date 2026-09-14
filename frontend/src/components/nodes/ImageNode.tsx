@@ -3,6 +3,7 @@ import { type NodeProps, Handle, Position } from '@xyflow/react'
 import { Image as ImageIcon, Upload, Link2, Loader2 } from 'lucide-react'
 import api, { errorText } from '../../api'
 import NodeShell from './NodeShell'
+import PreviewImage from '../PreviewImage'
 import { useUpdateNodeData } from './context'
 import type { ImageNodeData } from '../../canvasTypes'
 
@@ -50,7 +51,7 @@ const ImageNode = memo(function ImageNode({ id, data }: NodeProps) {
     <div className="relative">
       <NodeShell title="图片素材" icon={<ImageIcon className="w-3.5 h-3.5" />} className="w-48">
         {d.signed_url ? (
-          <img src={d.signed_url} alt={d.name} className="w-full rounded-lg mb-2" />
+          <PreviewImage src={d.signed_url} alt={d.name} className="w-full h-28 rounded-lg mb-2" />
         ) : (
           <div className="w-full h-24 flex items-center justify-center bg-[var(--color-surface-3)] rounded-lg mb-2">
             <ImageIcon className="w-6 h-6 text-[var(--color-ink-tertiary)]" />

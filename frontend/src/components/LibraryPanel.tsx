@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { X, Upload, Link2, Loader2, Search, Image as ImageIcon, Video, Music } from 'lucide-react'
 import api, { errorText } from '../api'
 import { cn } from '../lib/utils'
+import PreviewImage from './PreviewImage'
 
 export interface LibraryAsset {
   id: string; name: string
@@ -174,7 +175,7 @@ export default function LibraryPanel({ onClose, onAddToCanvas }: {
               onDoubleClick={() => onAddToCanvas(a)}
               className="group flex items-start gap-2.5 p-2 bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-lg cursor-grab active:cursor-grabbing hover:border-[var(--color-primary)]/60 transition-colors">
               {a.kind === 'image' && a.preview_url ? (
-                <img src={a.preview_url} alt={a.name} className="w-10 h-10 rounded-md object-cover shrink-0 bg-[var(--color-surface-3)]" />
+                <PreviewImage src={a.preview_url} alt={a.name} className="w-10 h-10 rounded-md shrink-0" />
               ) : (
                 <div className="w-10 h-10 rounded-md bg-[var(--color-surface-3)] flex items-center justify-center shrink-0">
                   <KIcon className="w-4 h-4 text-[var(--color-ink-tertiary)]" />

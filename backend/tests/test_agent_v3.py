@@ -667,7 +667,8 @@ class TestAgentP1Features(AgentV3TestBase):
                          category="natural", filename="a.png", description="海边"))
             db.commit()
 
-        with patch.object(chat_mod, "stream_chat", fake_stream_chat):
+        from types import SimpleNamespace
+        with patch.object(chat_mod, "stream_chat", fake_stream_chat), patch.object(agent, "resolve_model", return_value=SimpleNamespace(id="test-model")):
             create = self.client.post("/api/agent/turns", json={
                 "surface": "studio", "user_input": "做一个海浪视频", "autonomy": "ask",
             })

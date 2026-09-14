@@ -58,7 +58,7 @@ def absolute_url(request: Request, path: str) -> str:
 
 
 @router.post("/uploads", response_model=UploadOut)
-async def upload_media(
+def upload_media(
     request: Request,
     file: UploadFile = File(...),
     user: User = Depends(current_user),
@@ -83,7 +83,7 @@ async def upload_media(
     parts: list[bytes] = []
     total = 0
     while True:
-        chunk = await file.read(CHUNK)
+        chunk = file.file.read(CHUNK)
         if not chunk:
             break
         total += len(chunk)

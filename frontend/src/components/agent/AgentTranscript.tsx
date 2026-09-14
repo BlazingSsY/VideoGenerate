@@ -326,7 +326,9 @@ const AgentTranscript = forwardRef<
           commitUser()
           break
         case 'error':
-          commitUser(u => ({
+          if (!currentUserRef.current) {
+            setMessages(items => [...items, { ...blankAssistant(), content: '[错误] ' + (data.message || ''), done: true }])
+          } else commitUser(u => ({
             ...u,
             content: u.content + '\n\n[错误] ' + (data.message || ''),
           }))

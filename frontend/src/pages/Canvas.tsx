@@ -73,6 +73,13 @@ function CanvasInner() {
   const { setBinding: setCanvasAgentBinding } = useCanvasAgentBridge()
   const [canvases, setCanvases] = useState<CanvasSummary[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [loadedCanvasId, setLoadedCanvasId] = useState<string | null>(null)
+  const loadedCanvasRef = useRef<string | null>(null)
+  const loadAbortRef = useRef<AbortController | null>(null)
+  const draftsRef = useRef(new Map<string, {
+    title: string; nodes: CanvasFlowNode[]; edges: CanvasFlowEdge[]; viewport: Viewport
+    lastSaved: string; revision: number; updatedAt: string
+  }>())
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasFlowNode>([] as CanvasFlowNode[])
   const [edges, setEdges, onEdgesChange] = useEdgesState<CanvasFlowEdge>([] as CanvasFlowEdge[])
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
@@ -170,21 +177,59 @@ function CanvasInner() {
   const loadCanvas = useCallback(async (id: string, preserveEdits = false) => {
     if (preserveEdits && activeIdRef.current !== id) return
     const sequence = ++loadSequenceRef.current
-    const before = draftSnapshot(nodesRef.current, edgesRef.current, viewportRef.current)
+    const before = preserveEdits ? draftSnapshot(nodesRef.current, edgesRef.current, viewportRef.current) : ''
+    if (!preserveEdits && loadedCanvasRef.current !== id) {
+      clearTimeout(saveTimerRef.current)
+      if (loadedCanvasRef.current) {
+        draftsRef.current.set(loadedCanvasRef.current, {
+          title: '', nodes: nodesRef.current, edges: edgesRef.current, viewport: viewportRef.current,
+          lastSaved: lastSaved.current, revision: revisionRef.current, updatedAt: updatedAtRef.current,
+        })
+      }
+      // Release images and players before waiting for the next graph request.
+      loadedCanvasRef.current = null
+      activeIdRef.current = id
+      setLoadedCanvasId(null)
+      nodesRef.current = []
+      edgesRef.current = []
+      setNodes([])
+      setEdges([])
+      setStatusMap({})
+      setCanvasRun(null)
+      setRunError('')
+      setSaveError(null)
+    }
+    loadAbortRef.current?.abort()
+    const controller = new AbortController()
+    loadAbortRef.current = controller
+    const cached = !preserveEdits ? draftsRef.current.get(id) : undefined
+    const restoreDraft = cached && draftSnapshot(cached.nodes, cached.edges, cached.viewport) !== cached.lastSaved
     const refuseReload = () => {
       setSaveError('智能体已更新画布。本地编辑仍保留，请保存或处理版本冲突后再刷新。')
       throw new Error('本地编辑尚未同步，已保留')
     }
     if (preserveEdits && before !== lastSaved.current) refuseReload()
-    const res = await api.get(`/api/canvases/${id}`)
+    const res = restoreDraft ? { data: {
+      id, title: cached.title, viewport: cached.viewport, nodes: cached.nodes,
+      edges: cached.edges.map(edge => ({ id: edge.id, source: edge.source, source_handle: edge.sourceHandle, target: edge.target, target_handle: edge.targetHandle })),
+      updated_at: cached.updatedAt, revision: cached.revision,
+    } } : await api.get(`/api/canvases/${id}`, { signal: controller.signal }).catch(error => {
+      if (controller.signal.aborted) return null
+      if (preserveEdits) throw error
+      setSaveError('画布加载失败，请重新选择此画布重试。')
+      return null
+    })
+    if (!res) return
     if (sequence !== loadSequenceRef.current) return
     if (preserveEdits) {
       if (activeIdRef.current !== id) return
       const current = draftSnapshot(nodesRef.current, edgesRef.current, viewportRef.current)
       if (current !== before || current !== lastSaved.current) refuseReload()
     }
-    const d: CanvasDetail = res.data
-    setTitle(d.title)
+    const d = res.data as CanvasDetail
+    loadedCanvasRef.current = id
+    setLoadedCanvasId(id)
+    if (d.title) setTitle(d.title)
     viewportRef.current = d.viewport
     const flowNodes: CanvasFlowNode[] = d.nodes.map(n => ({
       id: n.id, type: n.type, position: n.position,
@@ -197,6 +242,8 @@ function CanvasInner() {
     // 加载期净化：修正/清除历史脏边（裸名 handle、模型切换残留的悬空槽）——
     // 它们会让后端 validate_graph 对每次保存都 400。
     const flowEdges = sanitizeLoadedEdges(rawEdges, flowNodes, modelsRef.current)
+    nodesRef.current = flowNodes
+    edgesRef.current = flowEdges
     setNodes(flowNodes)
     setEdges(flowEdges)
     setStatusMap({})
@@ -204,10 +251,8 @@ function CanvasInner() {
     setRunError('')
     setSaveError(null)
     // 重载后 lastSaved 需匹配 save() 的快照形状，否则首帧必然触发一次空保存
-    d.nodes.forEach(n => {
-      if (n.status) setStatusMap(prev => ({ ...prev, [n.id]: { status: n.status, message_id: n.message_id } }))
-    })
-    lastSaved.current = draftSnapshot(flowNodes, flowEdges, d.viewport)
+    setStatusMap(Object.fromEntries(d.nodes.filter(n => n.status).map(n => [n.id, { status: n.status, message_id: n.message_id }])))
+    lastSaved.current = restoreDraft ? cached.lastSaved : draftSnapshot(flowNodes, flowEdges, d.viewport)
     updatedAtRef.current = d.updated_at
     revisionRef.current = d.revision || 0
     void refreshStatus(id)
@@ -224,7 +269,7 @@ function CanvasInner() {
 
   const performSave = useCallback(async () => {
     clearTimeout(saveTimerRef.current)
-    if (!activeId || activeIdRef.current !== activeId) return
+    if (!activeId || activeIdRef.current !== activeId || loadedCanvasRef.current !== activeId) return
     const curNodes = nodesRef.current
     const curEdges = edgesRef.current
     const serNodes = serializeCanvasNodes(curNodes, curEdges)
@@ -235,14 +280,17 @@ function CanvasInner() {
     setSaving(true)
     try {
       const res = await api.put(`/api/canvases/${activeId}/graph`, payload)
-      if (activeIdRef.current !== activeId) return
       const d = res.data as { updated_at: string; revision: number }
+      const cached = draftsRef.current.get(activeId)
+      if (cached) { cached.updatedAt = d.updated_at; cached.revision = d.revision; cached.lastSaved = snap }
+      if (activeIdRef.current !== activeId) return
       updatedAtRef.current = d.updated_at
       revisionRef.current = d.revision
       lastSaved.current = snap
       setSaveError(null)
       await refreshStatus(activeId)
     } catch (err: any) {
+      if (activeIdRef.current !== activeId) throw err
       // 不再静默吞错：保存失败必须可见，否则用户以为已保存、刷新后回退。
       const detail = String(err?.response?.data?.detail || err?.message || '保存失败')
       if (err?.response?.status === 409) {
@@ -278,6 +326,12 @@ function CanvasInner() {
   const [undoDepth, setUndoDepth] = useState(0)
   const undoLock = useRef(false)   // 恢复动作本身不再入栈
   const lastSnapSig = useRef('')
+  useEffect(() => {
+    undoStack.current = []
+    lastSnapSig.current = ''
+    setUndoDepth(0)
+  }, [activeId])
+  useEffect(() => () => loadAbortRef.current?.abort(), [])
 
   /** pushUndo：在每一次「用户实际改动」前调用，记录改动前的状态 */
   const pushUndo = useCallback(() => {
@@ -389,6 +443,7 @@ function CanvasInner() {
   }
 
   const newCanvas = async () => {
+    void save().catch(() => {})
     const res = await api.post('/api/canvases', {})
     const c: CanvasSummary = res.data
     setCanvases(prev => [c, ...prev])
@@ -484,7 +539,7 @@ function CanvasInner() {
   const busyNodes = Object.values(statusMap).some(status => ['queued', 'pending', 'running'].includes(status.status))
 
   useEffect(() => {
-    if (!activeId) {
+    if (!activeId || loadedCanvasId !== activeId) {
       setCanvasAgentBinding(null)
       return
     }
@@ -500,7 +555,7 @@ function CanvasInner() {
       },
     })
     return () => setCanvasAgentBinding(null)
-  }, [activeId, loadCanvas, refreshStatus, save, setCanvasAgentBinding])
+  }, [activeId, loadedCanvasId, loadCanvas, refreshStatus, save, setCanvasAgentBinding])
 
   if (booting) return <div className="flex items-center justify-center h-full bg-[var(--color-bg)]"><div className="w-8 h-8 border-2 border-[var(--color-primary)] border-t-transparent rounded-full animate-spin" /></div>
 
@@ -525,7 +580,7 @@ function CanvasInner() {
               <div key={c.id} className={cn(
                 'group relative flex items-center gap-2 px-2 py-1.5 rounded-lg border cursor-pointer mb-1 transition-colors',
                 c.id === activeId ? 'bg-[var(--color-sidebar-accent)] border-[var(--color-border)]' : 'border-transparent hover:bg-[var(--color-surface-3)]'
-              )} onClick={() => { setActiveId(c.id); loadCanvas(c.id) }}>
+              )} onClick={() => { if (c.id === activeId && loadedCanvasRef.current === c.id) return; void save().catch(() => {}); setTitle(c.title); setActiveId(c.id); void loadCanvas(c.id) }}>
                 {renameId === c.id ? (
                   <input autoFocus value={renameVal} onChange={e => setRenameVal(e.target.value)} onBlur={() => { renameCanvas(c.id, renameVal); setRenameId(null) }} onKeyDown={e => { if (e.key === 'Enter') { renameCanvas(c.id, renameVal); setRenameId(null) } }} onClick={e => e.stopPropagation()} className="flex-1 bg-transparent text-xs text-[var(--color-ink)] outline-none border-b border-[var(--color-primary)]" />
                 ) : (
@@ -680,6 +735,7 @@ function CanvasInner() {
         <CanvasNodeProvider value={{
           models,
           activeCanvasId: activeId,
+          activeCanvasIdRef: activeIdRef,
           statusMap,
           canvasRunning,
           runNode,
@@ -698,6 +754,7 @@ function CanvasInner() {
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               fitView
+              onlyRenderVisibleElements
               fitViewOptions={{ maxZoom: 0.7 }}
               deleteKeyCode={["Backspace", "Delete"]}
               connectionRadius={40}

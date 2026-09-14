@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -120,8 +121,8 @@ async def create_turn(
     if settings.agent_provider_configured or payload.agent_model_id:
         try:
             selected_model = resolve_model(payload.agent_model_id).id
-        except AgentError:
-            selected_model = ""
+        except AgentError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
 
     # 当日 token 限额（用户级）：S1/S4 之前拦截
     if settings.agent_daily_token_limit > 0:
@@ -148,7 +149,7 @@ async def create_turn(
 
     asyncio.create_task(orchestrate_turn(
         turn.id, user.id, payload.user_input, user.role,
-        payload.surface, payload.target_id, payload.agent_model_id,
+        payload.surface, payload.target_id, selected_model or None,
         [item.model_dump() for item in payload.reference_media],
         payload.target_duration, payload.autonomy,
     ))
@@ -222,10 +223,25 @@ async def turn_events(
 
         queue = get_event_queue(turn_id)
         while True:
+            # The producer discards its in-memory queue after completion. A
+            # delayed first connection or reconnect must recover from the DB,
+            # rather than wait forever on a fresh, empty queue.
+            if queue.empty():
+                with SessionLocal() as snapshot_db:
+                    current = snapshot_db.get(AgentTurn, turn_id)
+                    if current is not None and current.status != "draft":
+                        snapshot = {
+                            "messages": session_messages(current.session_id, snapshot_db, user),
+                            "runs": session_runs(current.session_id, snapshot_db, user),
+                        }
+                        encoded = json.dumps(jsonable_encoder(snapshot), ensure_ascii=False)
+                        yield f"event: session.snapshot\ndata: {encoded}\n\n"
+                        yield f"event: done\ndata: {{\"turn_id\": \"{turn_id}\"}}\n\n"
+                        return
             try:
                 event = await asyncio.wait_for(
                     queue.get(),
-                    timeout=float(settings.agent_stream_idle_timeout),
+                    timeout=min(2.0, float(settings.agent_stream_idle_timeout)),
                 )
                 event_type = event.get("event", "message")
                 event_data_raw = event.get("data", {})
@@ -249,6 +265,41 @@ async def turn_events(
             "Connection": "keep-alive",
         },
     )
+
+
+@router.get("/sessions")
+def list_sessions(
+    surface: str = "canvas",
+    target_id: str = "",
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    # Scope in SQL: a history entry must belong to this user and this canvas.
+    first_input = (
+        db.query(AgentTurn.user_input)
+        .filter(AgentTurn.session_id == AgentSession.id)
+        .order_by(AgentTurn.created_at, AgentTurn.id)
+        .limit(1).correlate(AgentSession).scalar_subquery()
+    )
+    latest_id = (
+        db.query(AgentTurn.id)
+        .filter(AgentTurn.session_id == AgentSession.id)
+        .order_by(AgentTurn.created_at.desc(), AgentTurn.id.desc())
+        .limit(1).correlate(AgentSession).scalar_subquery()
+    )
+    rows = (
+        db.query(AgentSession, AgentTurn, first_input.label("title"))
+        .join(AgentTurn, AgentTurn.id == latest_id)
+        .filter(AgentSession.user_id == user.id, AgentSession.surface == surface, AgentSession.target_id == target_id)
+        .order_by(AgentTurn.created_at.desc(), AgentSession.id)
+        .all()
+    )
+    return [
+        {"id": session.id, "title": (title or "新对话")[:100],
+         "updated_at": turn.created_at, "latest_turn_id": turn.id,
+         "latest_turn_status": turn.status, "latest_user_input": turn.user_input}
+        for session, turn, title in rows
+    ]
 
 
 @router.get("/sessions/{session_id}/messages", response_model=list[AgentChatMessageOut])

@@ -40,3 +40,6 @@ artifacts/
 # macOS AppleDouble（外接盘/非原生文件系统会生成）
 ._*
 .DS_Store
+
+# Tiny synthetic clip used by browser playback regressions.
+!frontend/tests/fixtures/player.mp4

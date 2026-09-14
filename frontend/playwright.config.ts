@@ -10,6 +10,7 @@ export default defineConfig({
     baseURL: 'http://localhost:5199',
     headless: true,
     screenshot: 'only-on-failure',
+    ...(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : {}),
   },
   projects: [
     { name: 'desktop-1920', use: { viewport: { width: 1920, height: 1080 } } },

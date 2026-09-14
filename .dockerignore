@@ -12,3 +12,9 @@ __pycache__
 *.mp4
 .env
 .vscode
+.pytest_cache
+frontend/test-results
+frontend/playwright-report
+*.tar
+*.tar.gz
+*.jar

@@ -1,19 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
-import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { serveVideo } from './fixtures/video'
 
-let clip: Buffer
-test.beforeAll(() => {
-  const directory = mkdtempSync(join(tmpdir(), 'vg-player-test-'))
-  try {
-    const filename = join(directory, 'clip.mp4')
-    execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180:r=25',
-      '-t', '3', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', filename])
-    clip = readFileSync(filename)
-  } finally { rmSync(directory, { recursive: true, force: true }) }
-})
+// Small deterministic local clip; no external codecs or network are required.
 
 async function setup(page: Page, withOutput = true) {
   const state = { run: null as any, complete: false, readyShots: [] as string[], statusReads: 0, failSaves: false, saves: 0, starts: 0, nodeStarts: [] as string[], compositions: 0,
@@ -32,7 +20,7 @@ async function setup(page: Page, withOutput = true) {
     },
   }
   await page.addInitScript(() => localStorage.setItem('vg_token', 'test-token'))
-  await page.route('**/media/videos/*.mp4*', route => route.fulfill({ contentType: 'video/mp4', body: clip }))
+  await page.route('**/media/videos/*.mp4*', serveVideo)
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname
     const json = (value: unknown) => route.fulfill({ json: value })
@@ -98,7 +86,7 @@ test('一键运行先保存最新输入与输出顺序，刷新恢复进度，�
   await expect(page.getByTestId('run-canvas-btn')).toHaveText('运行中 0/3')
   state.complete = true
   await expect(page.getByText('全部完成，可在节点中观看视频')).toBeVisible({ timeout: 8000 })
-  await expect(page.getByTestId('generated-video-shot-1')).toHaveAttribute('controls', '')
+  await expect(page.getByTestId('generated-video-shot-1')).not.toHaveAttribute('controls')
   await expect(page.getByTestId('generated-video-shot-2')).toHaveAttribute('src', '/media/videos/shot-2.mp4')
   await expect(page.getByTestId('final-video')).toHaveAttribute('src', '/media/videos/out.mp4')
   for (const id of ['shot-1', 'shot-2', 'out']) {

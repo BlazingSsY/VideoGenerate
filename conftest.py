@@ -18,3 +18,4 @@ def pytest_sessionstart(session):
     from app.database import Base, engine
     from app import models  # register tables for background worker fallbacks
     Base.metadata.create_all(engine)
+    session.config.add_cleanup(engine.dispose)

@@ -1,10 +1,11 @@
-import { createContext, useCallback, useContext } from 'react'
+import { createContext, useCallback, useContext, type MutableRefObject } from 'react'
 import { useReactFlow } from '@xyflow/react'
 import type { VideoModel } from '../../types'
 
 export interface CanvasNodeContextValue {
   models: VideoModel[]
   activeCanvasId: string | null
+  activeCanvasIdRef?: MutableRefObject<string | null>
   statusMap: Record<string, { status: string; message_id: string | null; video_src?: string; error?: string }>
   refresh?: () => void
   canvasRunning?: boolean
@@ -22,7 +23,13 @@ export const CanvasNodeProvider = CanvasNodeContext.Provider
  */
 export function useUpdateNodeData(id: string, data: Record<string, unknown>) {
   const { setNodes } = useReactFlow()
+  const context = useContext(CanvasNodeContext)
+  const canvasId = context?.activeCanvasId
+  const activeCanvasIdRef = context?.activeCanvasIdRef
   return useCallback((patch: Record<string, unknown>) => {
+    // Offscreen nodes can finish uploading; nodes on a different canvas cannot
+    // patch a reused ID in the newly selected graph.
+    if (activeCanvasIdRef && activeCanvasIdRef.current !== canvasId) return
     setNodes(ns => ns.map(n => n.id === id ? { ...n, data: { ...n.data, ...patch } } : n))
-  }, [id, setNodes])
+  }, [id, setNodes, canvasId, activeCanvasIdRef])
 }

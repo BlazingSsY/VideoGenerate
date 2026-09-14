@@ -3,6 +3,7 @@ import { type NodeProps, Handle, Position } from '@xyflow/react'
 import { Video, Music, Upload, Link2, Loader2 } from 'lucide-react'
 import api, { errorText } from '../../api'
 import NodeShell from './NodeShell'
+import NodeVideo from './NodeVideo'
 import { useUpdateNodeData } from './context'
 import type { MediaNodeData } from '../../canvasTypes'
 
@@ -48,7 +49,7 @@ const MediaNode = memo(function MediaNode({ id, data }: NodeProps) {
     <div className="relative">
       <NodeShell title={isAudio ? '音频素材' : '视频素材'} icon={isAudio ? <Music className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />} className="w-48">
         {d.signed_url && !isAudio ? (
-          <video src={d.signed_url} className="w-full rounded-lg mb-2" controls muted />
+          <NodeVideo src={d.signed_url} title={d.name || '视频素材'} testId={`media-video-${id}`} />
         ) : (
           <div className="w-full h-20 flex items-center justify-center bg-[var(--color-surface-3)] rounded-lg mb-2">
             {isAudio ? <Music className="w-5 h-5 text-[var(--color-ink-tertiary)]" /> : <Video className="w-5 h-5 text-[var(--color-ink-tertiary)]" />}

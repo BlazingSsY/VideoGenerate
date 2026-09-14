@@ -46,6 +46,25 @@ export async function createAgentTurn(payload: {
   return res.data as { id: string; session_id: string; status: string }
 }
 
+export interface AgentTurnSnapshot {
+  id: string
+  session_id: string
+  user_input: string
+  status: string
+  steps: Array<{
+    seq: number
+    kind: string
+    title: string
+    payload?: any
+    status: string
+  }>
+}
+
+export async function getAgentTurn(turnId: string) {
+  const res = await api.get(`/api/agent/turns/${turnId}`)
+  return res.data as AgentTurnSnapshot
+}
+
 // Fetch available agent models from /api/agent/models (v1.5 compat endpoint)
 export async function getAgentModels() {
   const res = await api.get('/api/agent/models')
@@ -116,6 +135,20 @@ export async function getAgentSessionMessages(sessionId: string) {
     warning: string
     created_at: string
   }>
+}
+
+export interface AgentSessionSummary {
+  id: string
+  title: string
+  updated_at: string
+  latest_turn_id?: string
+  latest_turn_status?: string
+  latest_user_input?: string
+}
+
+export async function getAgentSessions(canvasId: string) {
+  const res = await api.get('/api/agent/sessions', { params: { surface: 'canvas', target_id: canvasId } })
+  return res.data as AgentSessionSummary[]
 }
 
 export async function cancelAgentRun(runId: string) {

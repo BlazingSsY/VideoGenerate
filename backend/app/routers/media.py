@@ -8,12 +8,14 @@ from pathlib import Path
 from urllib.parse import quote
 
 import httpx
+from PIL import Image, UnidentifiedImageError
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..media_links import verify
+from ..image_previews import image_preview
 from ..database import get_db
 from ..models import Conversation, Message, User
 from ..security import current_user
@@ -203,9 +205,27 @@ def media_video(
 
 
 @media_router.get("/uploads/{name}")
-def media_upload(
+async def media_upload(
     name: str,
     exp: str | None = Query(default=None),
     sig: str | None = Query(default=None),
+    preview: bool = Query(default=False),
+    download: bool = Query(default=False),
 ):
-    return _serve(settings.upload_dir, name, f"/media/uploads/{Path(name).name}", exp, sig)
+    if preview:
+        url_path = f"/media/uploads/{Path(name).name}"
+        ok, reason = verify(url_path, exp, sig)
+        if not ok:
+            raise HTTPException(status_code=403, detail=reason)
+        target = (settings.upload_dir / Path(name).name).resolve()
+        if not target.is_relative_to(settings.upload_dir.resolve()) or not target.is_file():
+            raise HTTPException(status_code=404, detail="文件不存在")
+        try:
+            thumbnail = await image_preview(target)
+        except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
+            raise HTTPException(status_code=422, detail="无法生成图片预览，请检查图片格式或尺寸") from None
+        return FileResponse(thumbnail, media_type="image/webp", headers={
+            "Cache-Control": f"private, max-age={settings.media_link_ttl}",
+            "X-Content-Type-Options": "nosniff",
+        })
+    return _serve(settings.upload_dir, name, f"/media/uploads/{Path(name).name}", exp, sig, download=download)
